@@ -1,0 +1,197 @@
+name: CI
+
+on:
+  push:
+    branches:
+      - windows-native-compat
+  pull_request:
+    branches:
+      - main
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  PIP_DISABLE_PIP_VERSION_CHECK: "1"
+  PYTHONDONTWRITEBYTECODE: "1"
+
+jobs:
+  application-tests:
+    name: Python 3.11 application and frontend checks
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Confirm local-only files are not tracked
+        shell: bash
+        run: |
+          set -euo pipefail
+          if git ls-files -z | python -c 'import sys; blocked=("config.ini", "config.windows.local.ini", ".env", ".venv/", "venv/", "data/", "logs/"); paths=sys.stdin.buffer.read().decode("utf-8").split("\0"); raise SystemExit(1 if any(path in blocked[:3] or path.startswith(blocked[3:]) or path.lower().endswith((".db", ".log")) for path in paths if path) else 0)'; then
+            echo "Tracked-file boundary check OK"
+          else
+            echo "ERROR: A local-only runtime file is tracked." >&2
+            exit 1
+          fi
+
+      - name: Install Python requirements
+        run: python -m pip install -r requirements.txt
+
+      - name: Run Windows compatibility tests
+        run: python -m unittest discover -s tests -p "test_windows_compat.py"
+
+      - name: Run Traditional Chinese interface tests
+        run: python -m unittest discover -s tests -p "test_traditional_chinese_ui.py"
+
+      - name: Run security regression tests
+        run: python -m unittest discover -s tests -p "test_security_regressions.py"
+
+      - name: Run frontend offline and privacy tests
+        run: python -m unittest discover -s tests -p "test_frontend_offline_privacy.py"
+
+      - name: Run Google Maps, deployment, and policy tests
+        run: python -m unittest discover -s tests -p "test_deployment_and_policy.py"
+
+      - name: Run CI workflow regression tests
+        run: python -m unittest discover -s tests -p "test_ci_workflow.py"
+
+      - name: Check Python syntax
+        shell: bash
+        run: |
+          python - <<'PY'
+          import ast
+          import subprocess
+          from pathlib import Path
+
+          paths = subprocess.check_output(
+              ["git", "ls-files", "--", "*.py"],
+              text=True,
+          ).splitlines()
+          for relative_path in paths:
+              source = Path(relative_path).read_text(encoding="utf-8-sig")
+              ast.parse(source, filename=relative_path)
+          print(f"Python syntax OK ({len(paths)} files)")
+          PY
+
+      - name: Check JavaScript syntax
+        shell: bash
+        run: git ls-files -z -- "*.js" | xargs -0 -r -n 1 node --check
+
+      - name: Check Git whitespace
+        shell: bash
+        run: |
+          git diff --check
+          git diff --cached --check
+          git show --check --format= --no-renames HEAD
+
+  deployment-static:
+    name: GNU Make and Docker Compose static validation
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    env:
+      CI_SECRET_DIR: ${{ runner.temp }}/ntrip-caster-ci
+      CI_ENV_FILE: ${{ runner.temp }}/ntrip-caster-ci/compose.env
+      CI_RUNTIME_CONFIG: ${{ runner.temp }}/ntrip-caster-ci/runtime.ini
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Run safe GNU Make static target
+        shell: bash
+        run: |
+          make --version
+          make ci-static-check PYTHON=python
+
+      - name: Prepare ephemeral test credentials
+        shell: bash
+        run: |
+          set -euo pipefail
+          umask 077
+          install -d -m 700 "$CI_SECRET_DIR"
+          python scripts/deployment_config.py prepare-env \
+            --env-file "$CI_ENV_FILE" \
+            --example .env.example \
+            --monitoring \
+            --environment testing \
+            --profiles "" > /dev/null
+          chmod 600 "$CI_ENV_FILE"
+          python - "$CI_ENV_FILE" "$CI_RUNTIME_CONFIG" <<'PY'
+          import argparse
+          import configparser
+          import contextlib
+          import io
+          import os
+          import sys
+          from pathlib import Path
+
+          from scripts import deployment_config
+
+          env_path = Path(sys.argv[1])
+          runtime_path = Path(sys.argv[2])
+          values = deployment_config._read_env_values(env_path.read_text(encoding="utf-8"))
+          required_passwords = (
+              values.get("NTRIP_ADMIN_PASSWORD", ""),
+              values.get("GRAFANA_ADMIN_PASSWORD", ""),
+          )
+          if not all(deployment_config.is_secure_password(value) for value in required_passwords):
+              raise SystemExit("Generated CI credentials failed validation")
+
+          os.environ["NTRIP_ADMIN_USERNAME"] = values.get("NTRIP_ADMIN_USERNAME", "admin")
+          os.environ["NTRIP_ADMIN_PASSWORD"] = values["NTRIP_ADMIN_PASSWORD"]
+          os.environ.pop("NTRIP_SECRET_KEY", None)
+          arguments = argparse.Namespace(
+              output=str(runtime_path),
+              ntrip_host="0.0.0.0",
+              web_host="127.0.0.1",
+              ntrip_port=2101,
+              web_port=5757,
+              database_path=str(runtime_path.parent / "data" / "ci.db"),
+              log_dir=str(runtime_path.parent / "logs"),
+              force=False,
+          )
+          with contextlib.redirect_stdout(io.StringIO()):
+              deployment_config.write_runtime_config(arguments)
+
+          parser = configparser.ConfigParser(interpolation=None)
+          parser.read(runtime_path, encoding="utf-8")
+          if not deployment_config.is_secure_secret(parser.get("security", "secret_key")):
+              raise SystemExit("Generated CI Flask secret failed validation")
+          if not deployment_config.is_secure_password(parser.get("admin", "password")):
+              raise SystemExit("Generated CI administrator credential failed validation")
+          PY
+
+      - name: Validate Docker Compose files without starting containers
+        shell: bash
+        run: |
+          set -euo pipefail
+          docker compose version
+          docker compose --env-file "$CI_ENV_FILE" -f docker-compose.yml config --quiet
+          docker compose --env-file "$CI_ENV_FILE" -f docker-compose.yml -f docker-compose.prod.yml config --quiet
+          for profile in nginx monitoring cache; do
+            docker compose --env-file "$CI_ENV_FILE" -f docker-compose.yml --profile "$profile" config --quiet
+          done
+          docker compose --env-file "$CI_ENV_FILE" -f docker-compose.yml \
+            --profile nginx --profile monitoring --profile cache config --quiet
+          docker compose --env-file "$CI_ENV_FILE" -f docker-compose.yml -f docker-compose.prod.yml \
+            --profile nginx --profile monitoring --profile cache config --quiet
+
+      - name: Remove ephemeral test credentials
+        if: ${{ always() }}
+        shell: bash
+        run: rm -rf -- "$CI_SECRET_DIR"

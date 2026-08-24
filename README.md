@@ -22,27 +22,33 @@ It used to be a single file 2rtk.py,https://github.com/Rampump/2RTKcaster   . bu
 
 ## Installation Tutorials
 
-### Docker Deployment (Recommended)
-Recommended one-click deployment, no manual configuration required.
+### Windows 11 Native
+
+- Use 64-bit Python 3.11; Docker, WSL, Linux, and Redis are not required.
+- See [Windows 11 native installation](WINDOWS-INSTALL.md).
+
+### Docker Deployment
+
+Create an ignored `.env` securely, review it locally before first start, and validate Compose:
+
 ```bash
-# Pull and run directly, the image will automatically create required directories and configuration files
-docker run -d \
-  --name ntrip-caster \
-  -p 2101:2101 \
-  -p 5757:5757 \
-  2rtk/ntripcaster:latest
+python3 scripts/deployment_config.py prepare-env --env-file .env --example .env.example
+docker compose config --quiet
+docker compose up -d ntrip-caster
 ```
-- **中文教程**: [Docker 安装和使用教程](DOCKER-TUTORIAL.md)
+
+- Web publishing defaults to `127.0.0.1:5757`; NTRIP defaults to externally reachable TCP port 2101.
+- Restrict NTRIP source networks with a firewall and never publish `.env` or runtime configuration.
+- **中文教程**: [Docker 安裝與使用](DOCKER-TUTORIAL.md)
 - **English Tutorial**: [Docker Installation and Usage Guide](DOCKER-TUTORIAL-EN.md)
 
 ### Debian System Native Installation
 - **中文教程**: [Linux 系统原生安装教程](INSTALL-TUTORIAL.md)
 - **English Tutorial**: [Linux Native Installation Guide](INSTALL-TUTORIAL-EN.md)
 
-**Access URLs**:
-- Web Management Interface: `http://yourserverip:5757`
-- NTRIP Service: `ntrip://yourserverip:2101`
-- Default Account: `admin` / `admin123` (Remember to change the default password)
+Native Web management defaults to `http://127.0.0.1:5757`. NTRIP uses TCP 2101 and is exposed only when the
+operator intentionally configures host binding, port publishing, and firewall access.
+- Administrator username: `admin`; set a private password before starting the service.
 
 ## Hardware Recommendations
 
@@ -85,7 +91,8 @@ You can view RTCM status on the base station information page. Click the INFO bu
 | **2000+** | 16+ cores | 16GB+ | 100GB+ | 500Mbps+ |
 
 ### Cloud Server Recommendations
-For cloud server deployment, please open ports 5757 and 2101 in security settings
+For cloud deployment, expose TCP 2101 only when remote NTRIP clients require it. Keep Web management local
+or place it behind a hardened TLS reverse proxy.
 #### AWS EC2
 - **Entry Level**: t3.small (2 cores 2GB)
 - **Standard**: c5.large (2 cores 4GB)
@@ -104,27 +111,33 @@ For cloud server deployment, please open ports 5757 and 2101 in security setting
 ### Main Configuration Options
 
 ```ini
-[ntrip]
-port = 2101                    # NTRIP service port
-max_connections = 5000         # Maximum connections
+[network]
+host = 127.0.0.1               # Safe native default
+max_connections = 5000
 
-[web] 
+[ntrip]
+host = 127.0.0.1
+port = 2101                    # NTRIP service port
+
+[web]
+host = 127.0.0.1
 port = 5757                    # Web management port
-refresh_interval = 10          # Data refresh interval
 
 [performance]
 thread_pool_size = 5000        # Concurrent connection thread pool size
 max_workers = 5000             # Maximum worker threads
+
+[data_forwarding]
 ring_buffer_size = 60          # Ring buffer size
 
 [security]
-secret_key = your-secret-key   # Please change the default key in production
+secret_key = REPLACE_WITH_RANDOM_SECRET_KEY
 ```
 
 ```ini
 [admin]
 username = admin               # Administrator username
-password = admin123            # Administrator password (change in production)
+password = REPLACE_WITH_STRONG_ADMIN_PASSWORD
 ```
 
 ### Common Issue Diagnosis
@@ -147,9 +160,8 @@ sudo fuser -k 2101/tcp             # Force release port
 sudo ufw status                    # Ubuntu firewall
 sudo firewall-cmd --list-all       # CentOS firewall
 
-# Open ports
-sudo ufw allow 2101/tcp            # NTRIP port
-sudo ufw allow 5757/tcp            # Web management port
+# Open only NTRIP when remote clients are required
+sudo ufw allow 2101/tcp
 
 # Network connectivity test
 telnet localhost 2101              # Test NTRIP port
@@ -162,12 +174,16 @@ curl http://localhost:5757/        # Test Web port
 ```ini
 # config.ini optimization configuration
 [ntrip]
-max_connections = 10000            # Maximum connections
 port = 2101
+
+[network]
+max_connections = 10000            # Maximum connections
 
 [performance]
 thread_pool_size = 10000           # Thread pool size
 max_workers = 10000                # Maximum worker threads
+
+[data_forwarding]
 ring_buffer_size = 60              # Ring buffer
 
 [network]
@@ -193,10 +209,10 @@ sudo sysctl -p
 ```ini
 # config.ini log configuration
 [logging]
-level = INFO                       # DEBUG, INFO, WARNING, ERROR
-format = json                      # json, text
-rotate_size = 100MB               # Log rotation size
-rotate_count = 10                 # Number of log files to keep
+log_level = INFO                   # DEBUG, INFO, WARNING, ERROR
+log_dir = logs
+max_log_size = 10485760
+backup_count = 10
 ```
 ## Contributing
 

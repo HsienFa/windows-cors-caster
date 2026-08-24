@@ -1,7 +1,5 @@
 # Docker Compose 生产环境配置
-# 使用方法: docker-compose -f docker-compose.yml -f docker-compose.prod.yml up -d
-
-version: '3.8'
+# 使用方法: docker compose -f docker-compose.yml -f docker-compose.prod.yml up -d
 
 services:
   ntrip-caster:
@@ -79,13 +77,12 @@ services:
           cpus: '0.1'
     # 生产环境SSL配置
     ports:
-      - "80:80"
-      - "443:443"
+      - "${NGINX_PUBLISH_HOST:-127.0.0.1}:80:80"
+      - "${NGINX_PUBLISH_HOST:-127.0.0.1}:443:443"
     volumes:
       - ./nginx/nginx.conf:/etc/nginx/nginx.conf:ro
       - ./nginx/conf.d:/etc/nginx/conf.d:ro
       - ./nginx/ssl:/etc/nginx/ssl:ro
-      - ./nginx/dhparam.pem:/etc/nginx/dhparam.pem:ro
       - nginx-cache:/var/cache/nginx
       - nginx-logs:/var/log/nginx
     # 生产环境健康检查
@@ -117,8 +114,6 @@ services:
       - '--web.enable-lifecycle'
       - '--web.enable-admin-api'
       - '--log.level=warn'
-      - '--web.external-url=https://your-domain.com/prometheus/'
-      - '--web.route-prefix=/'
 
   grafana:
     # 生产环境Grafana配置
@@ -137,13 +132,8 @@ services:
       - GF_SECURITY_DISABLE_GRAVATAR=true
       - GF_ANALYTICS_REPORTING_ENABLED=false
       - GF_ANALYTICS_CHECK_FOR_UPDATES=false
-      - GF_SECURITY_COOKIE_SECURE=true
       - GF_SECURITY_COOKIE_SAMESITE=strict
-      - GF_SERVER_ROOT_URL=https://your-domain.com/grafana/
-      - GF_SERVER_SERVE_FROM_SUB_PATH=true
       - GF_LOG_LEVEL=warn
-    secrets:
-      - grafana_admin_password
 
   redis:
     # 生产环境Redis配置
@@ -168,37 +158,24 @@ services:
       --tcp-keepalive 60
       --timeout 300
 
-# 生产环境密钥管理
-secrets:
-  grafana_admin_password:
-    file: ./secrets/grafana_admin_password.txt
-
 # 生产环境网络配置
 networks:
   ntrip-network:
-    external: true
     name: ntrip-production-network
 
 # 生产环境卷配置
 volumes:
   ntrip-data:
-    external: true
     name: ntrip-production-data
   ntrip-logs:
-    external: true
     name: ntrip-production-logs
   ntrip-config:
-    external: true
     name: ntrip-production-config
   prometheus-data:
-    external: true
     name: prometheus-production-data
   grafana-data:
-    external: true
     name: grafana-production-data
   nginx-cache:
-    external: true
     name: nginx-production-cache
   redis-data:
-    external: true
     name: redis-production-data

@@ -1,8 +1,8 @@
 <!DOCTYPE html>
-<html>
+<html lang="zh-Hant-TW">
 <head>
-    <title>Login - 2RTK Ntrip Caster</title>
-    <meta charset="utf-8">
+    <title>登入 - 2RTK Ntrip Caster</title>
+    <meta charset="UTF-8">
     <style>
         body {
             font-family: Arial, sans-serif;
@@ -88,14 +88,22 @@
             font-size: 12px;
             margin-top: 5px;
         }
+        .policy-links {
+            margin-top: 24px;
+            text-align: center;
+            font-size: 14px;
+        }
+        .policy-links a {
+            color: #4f46a5;
+            margin: 0 8px;
+        }
     </style>
 </head>
 <body>
     <div class="login-container">
         <div class="logo">
             <h1>2RTK Ntrip Caster</h1>
-            <p id="loginMessage">Administrator Login</p>
-            <p id="defaultCredentials" style="color: #1e40af; font-size: 12px; margin-top: 10px; margin-bottom: 0;">Default credentials: admin/admin123. Please change in Settings for production use.</p>
+            <p id="loginMessage">管理員登入</p>
         </div>
         
         {% if error %}
@@ -104,25 +112,29 @@
         
         <form method="post" id="loginForm" onsubmit="return validateLoginForm(event)">
             <div class="form-group">
-                <label>Username:</label>
+                <label>使用者名稱：</label>
                 <input type="text" name="username" id="username" required maxlength="50" 
                        oninput="validateUsername()">
                 <div id="usernameError" class="validation-error"></div>
             </div>
             <div class="form-group">
-                <label>Password:</label>
+                <label>密碼：</label>
                 <input type="password" name="password" id="password" required maxlength="100" 
                        oninput="validatePassword()">
                 <div id="passwordError" class="validation-error"></div>
             </div>
-            <button type="submit" class="btn" id="loginBtn">Login</button>
+            <button type="submit" class="btn" id="loginBtn">登入</button>
         </form>
+        <nav class="policy-links" aria-label="政策頁面">
+            <a href="{{ url_for('terms_of_use') }}">使用條款</a>
+            <a href="{{ url_for('privacy_policy') }}">隱私權政策</a>
+        </nav>
     </div>
     
     <script>
         let isSubmitting = false;
         
-        // 页面加载时检查重定向参数
+        // 頁面載入時檢查重新導向參數
         window.addEventListener('DOMContentLoaded', function() {
             const urlParams = new URLSearchParams(window.location.search);
             const redirectPage = urlParams.get('redirect');
@@ -130,12 +142,12 @@
             
             if (redirectPage) {
                 const pageNames = {
-                    'users': 'User Management',
-                    'mounts': 'Mount Point Management',
-                    'settings': 'System Settings'
+                    'users': '使用者管理',
+                    'mounts': '掛載點管理',
+                    'settings': '系統設定'
                 };
-                const pageName = pageNames[redirectPage] || 'Management Function';
-                messageElement.textContent = `Access to ${pageName} requires administrator account login, please login`;
+                const pageName = pageNames[redirectPage] || '管理功能';
+                messageElement.textContent = `存取「${pageName}」需要管理員帳號，請先登入。`;
             }
         });
         
@@ -153,13 +165,13 @@
             
             if (value.length < 3) {
                 input.classList.add('field-error');
-                error.textContent = 'Username must be at least 3 characters';
+                error.textContent = '使用者名稱至少需要 3 個字元';
                 return false;
             }
             
             if (value.length > 50) {
                 input.classList.add('field-error');
-                error.textContent = 'Username cannot exceed 50 characters';
+                error.textContent = '使用者名稱不得超過 50 個字元';
                 return false;
             }
             
@@ -167,7 +179,7 @@
             for (let char of invalidChars) {
                 if (value.includes(char)) {
                     input.classList.add('field-error');
-                    error.textContent = 'Username contains invalid characters';
+                    error.textContent = '使用者名稱含有不允許的字元';
                     return false;
                 }
             }
@@ -189,13 +201,13 @@
             
             if (value.length < 6) {
                 input.classList.add('field-error');
-                error.textContent = 'Password must be at least 6 characters';
+                error.textContent = '密碼至少需要 6 個字元';
                 return false;
             }
             
             if (value.length > 100) {
                 input.classList.add('field-error');
-                error.textContent = 'Password cannot exceed 100 characters';
+                error.textContent = '密碼不得超過 100 個字元';
                 return false;
             }
             
@@ -216,16 +228,16 @@
                 return false;
             }
             
-            // 防止重复提交
+            // 防止重複送出
             isSubmitting = true;
             const submitBtn = document.getElementById('loginBtn');
             submitBtn.disabled = true;
-            submitBtn.textContent = 'Logging in...';
+            submitBtn.textContent = '登入中...';
             
             setTimeout(() => {
                 isSubmitting = false;
                 submitBtn.disabled = false;
-                submitBtn.textContent = 'Login';
+                submitBtn.textContent = '登入';
             }, 5000);
             
             return true;

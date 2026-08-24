@@ -163,7 +163,7 @@ class NTRIPHandler:
             is_valid, error_msg = self._is_valid_request(method, path, headers)
             if not is_valid:
                 # 验证失败保持info级别，这是重要信息
-                log_info(f"请求验证失败 {self.client_address}: {error_msg}")
+                log_info(f"請求驗證失敗 {self.client_address}：{error_msg}")
                 self.send_error_response(400, f"Bad Request: {error_msg}")
                 return
             
@@ -202,7 +202,7 @@ class NTRIPHandler:
            
             self._cleanup()
         except Exception as e:
-            log_error(f"处理请求异常 {self.client_address}: {e}", exc_info=True)
+            log_error(f"處理請求時發生例外 {self.client_address}：{e}", exc_info=True)
             self.send_error_response(500, "Internal Server Error")
            
             self._cleanup()
@@ -551,13 +551,7 @@ class NTRIPHandler:
                 line_lower = line.lower()
                 
                 if 'authorization:' in line_lower:
-                    
-                    if 'basic' in line_lower:
-                        sanitized_lines.append('Authorization: Basic [REDACTED]')
-                    elif 'digest' in line_lower:
-                        sanitized_lines.append('Authorization: Digest [REDACTED]')
-                    else:
-                        sanitized_lines.append('Authorization: [REDACTED]')
+                    sanitized_lines.append('已收到認證標頭')
                 else:
                     sanitized_lines.append(line)
             
@@ -704,7 +698,7 @@ class NTRIPHandler:
                  return True, "Authentication successful"
         
         except Exception as e:
-            logger.log_error(f"用户验证异常: {e}", exc_info=True)
+            logger.log_error(f"使用者驗證發生例外：{e}", exc_info=True)
             return False, "Authentication error"
     
     def _verify_basic_auth(self, mount, auth_header, request_type="upload"):
@@ -750,7 +744,7 @@ class NTRIPHandler:
             
             return True, "Authentication successful"
         except Exception as e:
-            logger.log_error(f"Basic认证异常: {e}", exc_info=True)
+            logger.log_error(f"Basic 認證發生例外：{e}", exc_info=True)
             return False, "Authentication error"
     
     def _verify_digest_auth(self, mount, auth_header, request_type="upload"):
@@ -798,7 +792,7 @@ class NTRIPHandler:
             
             return True, "Authentication successful"
         except Exception as e:
-            logger.log_error(f"Digest认证异常: {e}", exc_info=True)
+            logger.log_error(f"Digest 認證發生例外：{e}", exc_info=True)
             return False, "Authentication error"
     
     def _parse_digest_auth(self, auth_header):
@@ -863,7 +857,7 @@ class NTRIPHandler:
             logger.log_debug(f"OPTIONS请求处理完成 {self.client_address}")
             
         except Exception as e:
-            logger.log_error(f"OPTIONS请求处理异常 {self.client_address}: {e}", exc_info=True)
+            logger.log_error(f"處理 OPTIONS 請求時發生例外 {self.client_address}：{e}", exc_info=True)
             self.send_error_response(500, "Internal Server Error")
     
     def handle_rtsp_command(self, method, path, headers):
@@ -909,7 +903,7 @@ class NTRIPHandler:
                 self.send_error_response(501, f"RTSP method not implemented: {method}")
                 
         except Exception as e:
-            logger.log_error(f"处理RTSP命令异常: {e}", exc_info=True)
+            logger.log_error(f"處理 RTSP 命令時發生例外：{e}", exc_info=True)
             self.send_error_response(500, "Internal Server Error")
     
     def _handle_rtsp_describe(self, mount, headers):
@@ -971,7 +965,7 @@ class NTRIPHandler:
             'CSeq': cseq,
             'Session': session,
             'Range': 'npt=0.000-',
-            'RTP-Info': f'url=rtsp://{config.HOST if config.HOST != "0.0.0.0" else "localhost"}:{config.NTRIP_PORT}/{mount};seq=1;rtptime=0'
+            'RTP-Info': f'url=rtsp://{config.NTRIP_HOST if config.NTRIP_HOST != "0.0.0.0" else "localhost"}:{config.NTRIP_PORT}/{mount};seq=1;rtptime=0'
         }
         
         self._send_response('RTSP/1.0 200 OK', additional_headers=rtsp_headers)
@@ -1021,7 +1015,7 @@ class NTRIPHandler:
     def _generate_sdp_description(self, mount):
         """生成SDP描述"""
         # 获取实际的IP地址用于SDP描述
-        origin_ip = config.HOST if config.HOST != "0.0.0.0" else "127.0.0.1"
+        origin_ip = config.NTRIP_HOST if config.NTRIP_HOST != "0.0.0.0" else "127.0.0.1"
         sdp = f"""v=0
 o=- 0 0 IN IP4 {origin_ip}
 s=NTRIP Stream {mount}
@@ -1041,16 +1035,19 @@ a=control:*
             if anti_spam_logger.should_log(message_key):
                 suppressed = anti_spam_logger.get_suppressed_count(message_key)
                 if suppressed > 0:
-                    logger.log_info(f"HANDLE_UPLOAD 被调用 {self.client_address}: path={path} (已抑制{suppressed}条相似消息)")
+                    logger.log_info(f"HANDLE_UPLOAD 已呼叫 {self.client_address}：path={path}（已抑制 {suppressed} 則相似訊息）")
                 else:
-                    logger.log_info(f"HANDLE_UPLOAD 被调用 {self.client_address}: path={path}")
+                    logger.log_info(f"HANDLE_UPLOAD 已呼叫 {self.client_address}：path={path}")
             logger.log_debug(f"handle_upload开始处理 {self.client_address}: path={path}")
             
             # 打印当前连接状态
             # print(f"\n>>> 新的上传请求 - IP: {self.client_address[0]}, 挂载点: {path.lstrip('/')}, 时间: {datetime.now().strftime('%H:%M:%S.%f')[:-3]}")
             # print(f">>> 请求详情 - 方法: POST, 路径: {path}, 用户代理: {headers.get('User-Agent', 'Unknown')}")
             
-            connection.get_connection_manager().cleanup_zombie_connections()
+            try:
+                connection.get_connection_manager().cleanup_zombie_connections()
+            except Exception as cleanup_error:
+                logger.log_warning(f"殭屍連線清理失敗，繼續處理上傳請求：{cleanup_error}")
             connection.get_connection_manager().force_refresh_connections()
             
             # 提取挂载点名称
@@ -1069,9 +1066,9 @@ a=control:*
                     if anti_spam_logger.should_log(message_key):
                         suppressed = anti_spam_logger.get_suppressed_count(message_key)
                         if suppressed > 0:
-                            logger.log_warning(f"挂载点 {mount} 已被 {existing_mount['ip_address']} 占用，拒绝来自 {self.client_address[0]} 的连接 (已抑制{suppressed}条相似消息)")
+                            logger.log_warning(f"掛載點 {mount} 已由 {existing_mount['ip_address']} 占用，拒絕來自 {self.client_address[0]} 的連線（已抑制 {suppressed} 則相似訊息）")
                         else:
-                            logger.log_warning(f"挂载点 {mount} 已被 {existing_mount['ip_address']} 占用，拒绝来自 {self.client_address[0]} 的连接")
+                            logger.log_warning(f"掛載點 {mount} 已由 {existing_mount['ip_address']} 占用，拒絕來自 {self.client_address[0]} 的連線")
                     self.send_error_response(409, f"Mount point {mount} is already online from {existing_mount['ip_address']}")
                     
                     try:
@@ -1080,19 +1077,20 @@ a=control:*
                         pass
                     return
                 elif existing_mount and existing_mount['ip_address'] == self.client_address[0]:
-                    logger.log_warning(f"检测到相同IP({self.client_address[0]})的重复连接，可能是连接异常，允许重新连接")
+                    logger.log_warning(f"偵測到相同 IP（{self.client_address[0]}）的重複連線，可能為連線異常，允許重新連線")
                     
-                    connection.get_connection_manager().remove_mount_connection(mount, "相同IP重复连接")
+                    connection.get_connection_manager().remove_mount_connection(mount, "相同 IP 重複連線")
             
             # 所有请求都必须通过完整的数据库验证，确保挂载点存在且密码正确
             auth_header = headers.get('authorization', '')
-            logger.log_info(f"handle_upload开始验证 {self.client_address}: mount={mount}, auth_header={auth_header[:50] if auth_header else 'None'}")
+            auth_log_message = "已收到認證標頭" if auth_header else "未收到認證標頭"
+            logger.log_info(f"handle_upload 開始驗證 {self.client_address}：mount={mount}，{auth_log_message}")
             is_valid, message = self.verify_user(mount, auth_header)
             
-            logger.log_info(f"handle_upload验证结果 {self.client_address}: is_valid={is_valid}, message={message}")
+            logger.log_info(f"handle_upload 驗證結果 {self.client_address}：is_valid={is_valid}, message={message}")
             
             if not is_valid:
-                logger.log_warning(f"handle_upload认证失败 {self.client_address}: {message}")
+                logger.log_warning(f"handle_upload 認證失敗 {self.client_address}：{message}")
                 self.send_auth_challenge(message)
                 # 认证失败时直接关闭socket
                 try:
@@ -1104,8 +1102,8 @@ a=control:*
             try:
                 success, message = connection.get_connection_manager().add_mount_connection(mount, self.client_address[0], getattr(self, 'user_agent', 'Unknown'), getattr(self, 'ntrip_version', '1.0'), self.client_socket)
                 if not success:
-                    logger.log_warning(f"挂载点 {mount} 连接被拒绝: {message}")
-                    logger.log_info(f"连接拒绝详情 - 挂载点: {mount}, IP: {self.client_address[0]}, 原因: {message}")
+                    logger.log_warning(f"掛載點 {mount} 的連線遭拒：{message}")
+                    logger.log_info(f"連線拒絕詳細資料 - 掛載點：{mount}，IP：{self.client_address[0]}，原因：{message}")
                     self.send_error_response(409, message)
                     
                     try:
@@ -1117,22 +1115,22 @@ a=control:*
                 self.mount_connection_established = True
                 
                 if success:
-                    logger.log_info(f"挂载点 {mount} 已成功添加到连接管理器: {message}")
+                    logger.log_info(f"掛載點 {mount} 已成功新增至連線管理器：{message}")
                 else:
-                    logger.log_warning(f"挂载点 {mount} 添加到连接管理器失败: {message}")
+                    logger.log_warning(f"掛載點 {mount} 新增至連線管理器失敗：{message}")
             except Exception as e:
-                logger.log_error(f"添加挂载点 {mount} 到连接管理器时发生异常: {e}", exc_info=True)
+                logger.log_error(f"將掛載點 {mount} 新增至連線管理器時發生例外：{e}", exc_info=True)
 
             self.send_upload_success_response()
             
             username_for_log = getattr(self, 'username', mount) if hasattr(self, 'username') else mount
             logger.log_mount_operation('upload_connected', mount, username_for_log)
             
-            logger.log_info(f"=== 开始接收RTCM数据 ===: mount={mount}")
+            logger.log_info(f"=== 開始接收 RTCM 資料 ===：mount={mount}")
             self._receive_rtcm_data(mount)
         
         except Exception as e:
-            logger.log_error(f"处理上传请求异常: {e}", exc_info=True)
+            logger.log_error(f"處理上傳請求時發生例外：{e}", exc_info=True)
             self.send_error_response(500, "Internal Server Error")
     
     def handle_download(self, path, headers):
@@ -1169,7 +1167,7 @@ a=control:*
                     self.send_error_response(500, "Failed to add client")
                     return
             except Exception as e:
-                logger.log_error(f"添加客户端失败: {e}", exc_info=True)
+                logger.log_error(f"新增用戶端失敗：{e}", exc_info=True)
                 self.send_error_response(500, "Failed to add client")
                 return
             
@@ -1180,7 +1178,7 @@ a=control:*
             self._keep_connection_alive()
         
         except Exception as e:
-            logger.log_error(f"处理下载请求异常: {e}", exc_info=True)
+            logger.log_error(f"處理下載請求時發生例外：{e}", exc_info=True)
             self.send_error_response(500, "Internal Server Error")
     
     def handle_http_get(self, path, headers):
@@ -1196,7 +1194,7 @@ a=control:*
             else:
                 self.send_error_response(404, "Not Found")
         except Exception as e:
-            logger.log_error(f"处理HTTP GET请求异常: {e}", exc_info=True)
+            logger.log_error(f"處理 HTTP GET 請求時發生例外：{e}", exc_info=True)
             self.send_error_response(500, "Internal Server Error")
     
     def _receive_rtcm_data(self, mount):
@@ -1219,14 +1217,14 @@ a=control:*
                     if e.winerror == 10038:  #10038 
                         logger.log_debug(f"挂载点 {mount} socket已被关闭，停止接收数据", 'ntrip')
                     else:
-                        logger.log_error(f"挂载点 {mount} socket错误: {e}", 'ntrip')
+                        logger.log_error(f"掛載點 {mount} 的 socket 錯誤：{e}", 'ntrip')
                     break
                 except socket.timeout:
                     logger.log_debug(f"挂载点 {mount} 数据接收超时", 'ntrip')
                     continue
         
         except Exception as e:
-            logger.log_error(f"接收RTCM数据异常: {e}", exc_info=True)
+            logger.log_error(f"接收 RTCM 資料時發生例外：{e}", exc_info=True)
         finally:
             
             def delayed_cleanup():
@@ -1234,12 +1232,12 @@ a=control:*
                 try:
                     forwarder.remove_mount_buffer(mount)
                 except Exception as e:
-                    logger.log_warning(f"清理转发器缓冲区失败: {e}", 'ntrip')
+                    logger.log_warning(f"清理轉送器緩衝區失敗：{e}", 'ntrip')
                 
                 try:
                     connection.get_connection_manager().remove_mount_connection(mount)
                 except Exception as e:
-                    log_warning(f"清理挂载点连接失败: {e}")
+                    log_warning(f"清理掛載點連線失敗：{e}")
                 
 
                 logger.log_mount_operation('disconnected', mount)
@@ -1247,7 +1245,7 @@ a=control:*
                 log_debug(f"挂载点 {mount} 延迟清理完成")
             
             # 记录断开事件，改为warning级别以确保重要信息被记录
-            log_warning(f"挂载点 {mount} 连接断开，将在1.5秒后清理数据")
+            log_warning(f"掛載點 {mount} 的連線中斷，將於 1.5 秒後清理資料")
             
 
             cleanup_timer = threading.Timer(1.5, delayed_cleanup)
@@ -1296,7 +1294,7 @@ a=control:*
             
             # 添加CAS信息（Caster信息）
             # 复用现有配置: server_name=author, server_port=NTRIP_PORT, operator=APP_NAME, network_name=author, website_url=APP_WEBSITE, fallback_ip=HOST
-            cas_line = f"CAS;{config.APP_AUTHOR};{config.NTRIP_PORT};{config.APP_NAME};{config.APP_AUTHOR};0;{config.CASTER_COUNTRY};{config.CASTER_LATITUDE};{config.CASTER_LONGITUDE};{config.HOST};0;{config.APP_WEBSITE}"
+            cas_line = f"CAS;{config.APP_AUTHOR};{config.NTRIP_PORT};{config.APP_NAME};{config.APP_AUTHOR};0;{config.CASTER_COUNTRY};{config.CASTER_LATITUDE};{config.CASTER_LONGITUDE};{config.NTRIP_HOST};0;{config.APP_WEBSITE}"
             content_lines.append(cas_line)
             
             # 添加NET信息（Network信息）
@@ -1332,7 +1330,7 @@ a=control:*
                     self.client_socket.send(response.encode('utf-8'))
                     log_debug(f"发送NTRIP 2.0格式挂载点列表到 {self.client_address}")
                 except Exception as e:
-                    logger.log_error(f"发送NTRIP 2.0挂载点列表失败: {e}", exc_info=True)
+                    logger.log_error(f"傳送 NTRIP 2.0 掛載點清單失敗：{e}", exc_info=True)
             else:
                 # NTRIP 1.0格式 - 使用SOURCETABLE格式
                 current_time = datetime.utcnow().strftime('%a, %d %b %Y %H:%M:%S GMT')
@@ -1356,12 +1354,12 @@ a=control:*
                     self.client_socket.send(response.encode('utf-8'))
                     log_debug(f"发送NTRIP 1.0格式挂载点列表到 {self.client_address}")
                 except Exception as e:
-                    logger.log_error(f"发送NTRIP 1.0挂载点列表失败: {e}", exc_info=True)
+                    logger.log_error(f"傳送 NTRIP 1.0 掛載點清單失敗：{e}", exc_info=True)
             
             log_debug(f"发送挂载点列表到 {self.client_address}")
         
         except Exception as e:
-            log_error(f"发送挂载点列表异常: {e}", exc_info=True)
+            log_error(f"傳送掛載點清單時發生例外：{e}", exc_info=True)
     
     def send_upload_success_response(self):
         """发送上传成功响应"""
@@ -1376,7 +1374,7 @@ a=control:*
                 response = "ICY 200 OK\r\n\r\n"
                 self.client_socket.send(response.encode('utf-8'))
             except Exception as e:
-                logger.log_error(f"发送上传成功响应失败: {e}", exc_info=True)
+                logger.log_error(f"傳送上傳成功回應失敗：{e}", exc_info=True)
     
     def send_download_success_response(self):
         """发送下载成功响应"""
@@ -1393,7 +1391,7 @@ a=control:*
                 self.client_socket.send(response.encode('utf-8'))
                 logger.log_debug(f"NTRIP 1.0下载响应已发送，保持长连接: {self.client_address}", 'ntrip')
             except Exception as e:
-                logger.log_error(f"发送下载成功响应失败: {e}", exc_info=True)
+                logger.log_error(f"傳送下載成功回應失敗：{e}", exc_info=True)
     
     def send_auth_challenge(self, message="Authentication required", auth_type="both"):
         """发送认证挑战"""
@@ -1429,7 +1427,7 @@ a=control:*
                 response += "\r\n"
                 self.client_socket.send(response.encode('utf-8'))
             except Exception as e:
-                logger.log_error(f"发送认证挑战失败: {e}", exc_info=True)
+                logger.log_error(f"傳送認證挑戰失敗：{e}", exc_info=True)
     
     def send_error_response(self, code, message):
         """发送HTTP错误响应"""
@@ -1456,7 +1454,7 @@ a=control:*
                 response = f"ERROR {code} {message}\r\n\r\n"
                 self.client_socket.send(response.encode('utf-8'))
             except Exception as e:
-                logger.log_error(f"发送错误响应失败: {e}", exc_info=True)
+                logger.log_error(f"傳送錯誤回應失敗：{e}", exc_info=True)
     
     def _generate_standard_headers(self, additional_headers=None):
         """生成标准HTTP响应头"""
@@ -1509,7 +1507,7 @@ a=control:*
             self.client_socket.send(response.encode('utf-8'))
             
         except Exception as e:
-            logger.log_error(f"发送响应失败: {e}", exc_info=True)
+            logger.log_error(f"傳送回應失敗：{e}", exc_info=True)
     
     def _cleanup(self):
         """清理资源"""
@@ -1535,7 +1533,7 @@ a=control:*
             self.client_socket.close()
             # print(f">>> 连接清理完成 - IP: {self.client_address[0]}")
         except Exception as e:
-            logger.log_error(f"清理资源时出错: {e}", exc_info=True)
+            logger.log_error(f"清理資源時發生錯誤：{e}", exc_info=True)
 
 class NTRIPCaster:
     """NTRIP Caster服务器 - 使用线程池处理高并发连接"""
@@ -1559,19 +1557,19 @@ class NTRIPCaster:
             
             self._start_ntrip_server()
             
-            log_system_event(f'NTRIP服务器已启动，监听端口: {NTRIP_PORT}')
+            log_system_event(f'NTRIP 伺服器已啟動，監聽連接埠：{NTRIP_PORT}')
             
             self._main_loop()
         
         except Exception as e:
-            log_error(f"启动NTRIP服务器失败: {e}", exc_info=True)
+            log_error(f"啟動 NTRIP 伺服器失敗：{e}", exc_info=True)
             self.stop()
     
     def _start_ntrip_server(self):
         """启动NTRIP服务器"""
         self.server_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         self.server_socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-        self.server_socket.bind(('0.0.0.0', NTRIP_PORT))
+        self.server_socket.bind((config.NTRIP_HOST, NTRIP_PORT))
         self.server_socket.listen(MAX_CONNECTIONS)
         self.running = True
         
@@ -1582,15 +1580,15 @@ class NTRIPCaster:
         
         self._start_connection_handler()
 
-        ntrip_urls = config.get_display_urls(NTRIP_PORT, "NTRIP服务器")
+        ntrip_urls = config.get_display_urls(NTRIP_PORT, "NTRIP服务器", config.NTRIP_HOST)
         if len(ntrip_urls) == 1:
-            log_system_event(f'NTRIP服务器已启动，监听地址: {ntrip_urls[0]}')
+            log_system_event(f'NTRIP 伺服器已啟動，監聽位址：{ntrip_urls[0]}')
         else:
-            log_system_event('NTRIP服务器已启动，可通过以下地址访问:')
+            log_system_event('NTRIP 伺服器已啟動，可透過下列位址存取：')
             for url in ntrip_urls:
                 log_system_event(f'  - {url}')
         
-        log_system_event(f'线程池大小: {MAX_WORKERS}, 连接队列大小: {CONNECTION_QUEUE_SIZE}')
+        log_system_event(f'執行緒集區大小：{MAX_WORKERS}，連線佇列大小：{CONNECTION_QUEUE_SIZE}')
     
 
     def _main_loop(self):
@@ -1602,7 +1600,7 @@ class NTRIPCaster:
                 # 检查连接数限制
                 with self.connection_lock:
                     if self.active_connections >= MAX_CONNECTIONS:
-                        log_warning(f"连接数已达上限 {MAX_CONNECTIONS}，拒绝连接 {client_address}")
+                        log_warning(f"連線數已達上限 {MAX_CONNECTIONS}，拒絕連線 {client_address}")
                         client_socket.close()
                         self.rejected_connections += 1
                         continue
@@ -1611,18 +1609,18 @@ class NTRIPCaster:
                     self.connection_queue.put((client_socket, client_address), timeout=1.0)
                     with self.connection_lock:
                         self.total_connections += 1
-                    log_info(f"接受连接来自 {client_address}, 队列大小: {self.connection_queue.qsize()}, 活跃连接: {self.active_connections}")
+                    log_info(f"接受來自 {client_address} 的連線，佇列大小：{self.connection_queue.qsize()}，作用中連線：{self.active_connections}")
                 except Full:
-                    log_warning(f"连接队列已满，拒绝连接 {client_address}")
+                    log_warning(f"連線佇列已滿，拒絕連線 {client_address}")
                     client_socket.close()
                     self.rejected_connections += 1
             
             except socket.error as e:
                 if self.running:
-                    log_error(f"接受连接异常: {e}", exc_info=True)
+                    log_error(f"接受連線時發生例外：{e}", exc_info=True)
                 break
             except Exception as e:
-                log_error(f"主循环异常: {e}", exc_info=True)
+                log_error(f"主迴圈發生例外：{e}", exc_info=True)
                 break
     
     def _start_connection_handler(self):
@@ -1643,13 +1641,13 @@ class NTRIPCaster:
                 with self.connection_lock:
                     self.active_connections += 1
                 
-                log_info(f"连接 {client_address} 已提交给线程池处理")
+                log_info(f"連線 {client_address} 已提交至執行緒集區處理")
                 
             except Empty:
                 
                 continue
             except Exception as e:
-                log_error(f"连接处理器异常: {e}", exc_info=True)
+                log_error(f"連線處理器發生例外：{e}", exc_info=True)
     
     def _handle_client_connection(self, client_socket, client_address):
         """处理单个客户端连接"""
@@ -1658,7 +1656,7 @@ class NTRIPCaster:
             handler = NTRIPHandler(client_socket, client_address, self.db_manager)
             handler.handle_request()
         except Exception as e:
-            log_error(f"处理客户端连接 {client_address} 时发生异常: {e}", exc_info=True)
+            log_error(f"處理用戶端連線 {client_address} 時發生例外：{e}", exc_info=True)
         finally:
            
             with self.connection_lock:
@@ -1669,7 +1667,7 @@ class NTRIPCaster:
             except:
                 pass
             
-            log_info(f"客户端连接 {client_address} 处理完成，活跃连接: {self.active_connections}")
+            log_info(f"用戶端連線 {client_address} 處理完成，作用中連線：{self.active_connections}")
     
     def get_performance_stats(self):
         """获取性能统计信息"""
@@ -1688,14 +1686,14 @@ class NTRIPCaster:
         """记录性能统计信息"""
         stats = self.get_performance_stats()
         log_info(
-            f"性能统计 - 活跃连接: {stats['active_connections']}/{stats['max_connections']}, "
-            f"队列大小: {stats['queue_size']}/{stats['connection_queue_size']}, "
-            f"总连接: {stats['total_connections']}, 拒绝: {stats['rejected_connections']}"
+            f"效能統計－作用中連線：{stats['active_connections']}/{stats['max_connections']}，"
+            f"佇列大小：{stats['queue_size']}/{stats['connection_queue_size']}，"
+            f"累計連線：{stats['total_connections']}，拒絕：{stats['rejected_connections']}"
         )
     
     def stop(self):
         """停止NTRIP服务器"""
-        log_system_event('正在关闭NTRIP服务器')
+        log_system_event('正在關閉 NTRIP 伺服器')
         
         self.running = False
         
@@ -1706,10 +1704,10 @@ class NTRIPCaster:
                 pass
         
         if self.thread_pool:
-            logger.log_system_event("正在关闭线程池...")
+            logger.log_system_event("正在關閉執行緒集區...")
             
             self.thread_pool.shutdown(wait=True)
-            log_system_event("线程池已关闭")
+            log_system_event("執行緒集區已關閉")
         
         while not self.connection_queue.empty():
             try:
@@ -1719,9 +1717,8 @@ class NTRIPCaster:
             except Empty:
                 break
             except Exception as e:
-                log_error(f"清理连接队列时发生异常: {e}", exc_info=True)
+                log_error(f"清理連線佇列時發生例外：{e}", exc_info=True)
         
         
-        log_system_event(f'NTRIP服务器已停止 - 总连接数: {self.total_connections}, 拒绝连接数: {self.rejected_connections}')
-        log_system_event('NTRIP服务器已关闭')
-
+        log_system_event(f'NTRIP 伺服器已停止 - 總連線數：{self.total_connections}，拒絕連線數：{self.rejected_connections}')
+        log_system_event('NTRIP 伺服器已關閉')

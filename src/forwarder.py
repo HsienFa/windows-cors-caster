@@ -148,7 +148,7 @@ class SimpleDataForwarder:
         self.running = True
         self.broadcast_thread = threading.Thread(target=self._broadcast_loop, daemon=True)
         self.broadcast_thread.start()
-        logger.log_system_event('数据转发器已启动')
+        logger.log_system_event('資料轉送器已啟動')
     
     def stop(self):
         """停止广播线程"""
@@ -163,7 +163,7 @@ class SimpleDataForwarder:
                 for client_info in mount_clients[:]:
                     self._close_client(client_info)
                     
-        logger.log_system_event('数据转发器已停止')
+        logger.log_system_event('資料轉送器已停止')
     
     def add_client(self, client_socket, user, mount, agent, addr, protocol_version, connection_id=None):
         """添加客户端连接（同步方式）"""
@@ -210,7 +210,7 @@ class SimpleDataForwarder:
             return client_info
             
         except Exception as e:
-            logger.log_error(f"添加客户端失败: {e}", exc_info=True)
+            logger.log_error(f"新增用戶端失敗：{e}", exc_info=True)
             try:
                 client_socket.close()
             except:
@@ -245,7 +245,7 @@ class SimpleDataForwarder:
             client_socket.setsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF, config.BUFFER_SIZE)
             
         except Exception as e:
-            logger.log_warning(f"设置TCP Keep-Alive失败: {e}", 'ntrip')
+            logger.log_warning(f"設定 TCP Keep-Alive 失敗：{e}", 'ntrip')
     
     def remove_client(self, client_info):
         """移除客户端连接"""
@@ -277,7 +277,7 @@ class SimpleDataForwarder:
             )
             
         except Exception as e:
-            logger.log_error(f"移除客户端失败: {e}", exc_info=True)
+            logger.log_error(f"移除用戶端失敗：{e}", exc_info=True)
     
     def _close_client(self, client_info):
         """关闭客户端连接"""
@@ -302,7 +302,7 @@ class SimpleDataForwarder:
         try:
             connection.update_mount_data_stats(mount, len(data_chunk))
         except Exception as e:
-            logger.log_error(f"更新挂载点 {mount} 数据统计时发生错误: {e}")
+            logger.log_error(f"更新掛載點 {mount} 的資料統計時發生錯誤：{e}")
     
     def create_mount_buffer(self, mount):
         with self.buffer_lock:
@@ -322,14 +322,14 @@ class SimpleDataForwarder:
     
     def _broadcast_loop(self):
         """广播循环"""
-        logger.log_system_event('数据广播循环开始运行')
+        logger.log_system_event('資料廣播迴圈開始執行')
         
         while self.running:
             try:
                 self._broadcast_data()
                 time.sleep(self.broadcast_interval)
             except Exception as e:
-                logger.log_error(f"广播循环异常: {e}", exc_info=True)
+                logger.log_error(f"廣播迴圈發生例外：{e}", exc_info=True)
                 time.sleep(1)
     
     def _broadcast_data(self):
@@ -351,7 +351,7 @@ class SimpleDataForwarder:
             try:
                 self._send_to_client(client_info, buffer)
             except Exception as e:
-                logger.log_warning(f"发送数据到客户端失败 ({client_info['addr']}): {e}", 'ntrip')
+                logger.log_warning(f"傳送資料至用戶端失敗（{client_info['addr']}）：{e}", 'ntrip')
                 disconnected_clients.append(client_info)
         
         # 清理断开的连接
@@ -391,7 +391,7 @@ class SimpleDataForwarder:
         except Exception as e:
             # 只在非网络错误时记录警告日志
             if "Connection" not in str(e) and "Broken pipe" not in str(e):
-                logger.log_warning(f"发送数据到客户端失败 ({client_info['addr']}): {e}", 'ntrip')
+                logger.log_warning(f"傳送資料至用戶端失敗（{client_info['addr']}）：{e}", 'ntrip')
             raise
     
     def _send_data_simple(self, client_info, data_list):
@@ -458,11 +458,11 @@ class SimpleDataForwarder:
             try:
                 self.remove_client(client_info)
                 disconnected_count += 1
-                logger.log_info(f"强制断开用户 {username} 的连接: {client_info['mount']}")
+                logger.log_info(f"強制中斷使用者 {username} 的連線：{client_info['mount']}")
             except Exception as e:
-                logger.log_error(f"强制断开用户 {username} 连接失败: {e}")
+                logger.log_error(f"強制中斷使用者 {username} 的連線失敗：{e}")
         
-        logger.log_info(f"强制断开用户 {username} 完成，共断开 {disconnected_count} 个连接")
+        logger.log_info(f"已完成強制中斷使用者 {username} 的連線，共中斷 {disconnected_count} 個連線")
         return disconnected_count > 0
     
     def force_disconnect_mount(self, mount_name):
@@ -477,16 +477,16 @@ class SimpleDataForwarder:
                     try:
                         self.remove_client(client_info)
                         disconnected_count += 1
-                        logger.log_info(f"强制断开挂载点 {mount_name} 的用户连接: {client_info['user']}")
+                        logger.log_info(f"強制中斷掛載點 {mount_name} 的使用者連線：{client_info['user']}")
                     except Exception as e:
-                        logger.log_error(f"强制断开挂载点 {mount_name} 用户连接失败: {e}")
+                        logger.log_error(f"強制中斷掛載點 {mount_name} 的使用者連線失敗：{e}")
         
         try:
             self.remove_mount_buffer(mount_name)
-            logger.log_info(f"移除挂载点 {mount_name} 的数据缓冲区")
+            logger.log_info(f"移除掛載點 {mount_name} 的資料緩衝區")
         except Exception as e:
-            logger.log_error(f"移除挂载点 {mount_name} 缓冲区失败: {e}")
-        logger.log_info(f"强制断开挂载点 {mount_name} 完成，共断开 {disconnected_count} 个用户连接")
+            logger.log_error(f"移除掛載點 {mount_name} 的緩衝區失敗：{e}")
+        logger.log_info(f"已完成強制中斷掛載點 {mount_name} 的連線，共中斷 {disconnected_count} 個使用者連線")
         return True
     
     def register_subscriber(self, mount_name, socket_write_end):
@@ -496,7 +496,7 @@ class SimpleDataForwarder:
                 self.subscribers[mount_name] = []
             self.subscribers[mount_name].append(socket_write_end)
             logger.log_debug(f"添加解析线程订阅挂载点 {mount_name}", 'ntrip')
-            logger.log_info(f"[DEBUG] 注册解析线程订阅 [挂载点: {mount_name}, 订阅者数: {len(self.subscribers[mount_name])}]")
+            logger.log_info(f"[DEBUG] 註冊解析執行緒訂閱 [掛載點：{mount_name}，訂閱者數：{len(self.subscribers[mount_name])}]")
     
     def unregister_subscriber(self, mount_name, socket_write_end):
         """注销数据订阅者"""
@@ -539,14 +539,14 @@ class SimpleDataForwarder:
                         # if i == 0:  # 只记录第一个订阅者的成功发送
                         #     logger.log_debug(f"[DEBUG] 成功发送到订阅者 #{i+1} [挂载点: {mount_name}]", 'ntrip')
                     except Exception as e:
-                        logger.log_error(f"向解析线程订阅者 #{i+1} 发送数据失败 [挂载点: {mount_name}]: {e}", 'ntrip')
+                        logger.log_error(f"傳送資料至解析執行緒訂閱者 #{i+1} 失敗 [掛載點：{mount_name}]：{e}", 'ntrip')
                         subscribers_to_remove.append(subscriber)
                 
                 # 移除失效的订阅者
                 for subscriber in subscribers_to_remove:
                     try:
                         self.subscribers[mount_name].remove(subscriber)
-                        logger.log_warning(f"[DEBUG] 移除解析线程失效订阅者 [挂载点: {mount_name}]", 'ntrip')
+                        logger.log_warning(f"[DEBUG] 移除解析執行緒的失效訂閱者 [掛載點：{mount_name}]", 'ntrip')
                     except ValueError:
                         pass
             
@@ -559,7 +559,7 @@ forwarder = SimpleDataForwarder()
 # 全局管理函数 扩容管理端
 def initialize():
     """初始化数据转发器"""
-    logger.log_system_event('数据转发器已初始化')
+    logger.log_system_event('資料轉送器已初始化')
     return forwarder
 
 def get_forwarder():
@@ -580,7 +580,7 @@ def add_client(client_socket, user, mount, agent, addr, protocol_version, connec
     try:
         return forwarder.add_client(client_socket, user, mount, agent, addr, protocol_version, connection_id)
     except Exception as e:
-        logger.log_error(f"添加客户端超时: {e}", 'ntrip')
+        logger.log_error(f"新增用戶端逾時：{e}", 'ntrip')
         raise
 
 def remove_client(client_info):

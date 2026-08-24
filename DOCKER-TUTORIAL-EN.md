@@ -1,497 +1,110 @@
-# NTRIP Caster Docker Installation and Usage Tutorial
+# NTRIP Caster Docker Installation and Usage
 
-This tutorial will guide you through installing and deploying NTRIP Caster v2.2.0 using Docker, providing the fastest and most reliable deployment method.
+This guide matches the current `Dockerfile`, `docker-compose.yml`, and deployment scripts. The image does
+not execute `config.ini.example`. On first start, the entrypoint writes a runtime configuration using the
+current lowercase schema into a named volume.
 
-## Table of Contents
-- [Prerequisites](#prerequisites)
-- [Quick Start](#quick-start)
-- [Detailed Installation](#detailed-installation)
-- [Configuration](#configuration)
-- [Usage](#usage)
-- [Common Issues](#common-issues)
-- [Advanced Configuration](#advanced-configuration)
-- [Updates and Maintenance](#updates-and-maintenance)
-- [Technical Support](#technical-support)
+## Security baseline
 
-## Prerequisites
+- Never commit `.env`, runtime configuration, databases, or logs.
+- There is no public administrator password. The container stops if the required value is missing or unsafe.
+- A Flask secret is securely generated and stored only in the configuration volume. It is not printed.
+- Web publishing is bound to `127.0.0.1:5757` on the Docker host by default.
+- NTRIP is published on `0.0.0.0:2101` by default. This permits remote probing and login attempts. Restrict
+  source networks with a firewall and use strong credentials. For local testing, set `NTRIP_PUBLISH_HOST`
+  to `127.0.0.1`.
 
-### System Requirements
-- **Operating System**: Linux, Windows, macOS
-- **Docker**: 20.10.0+
-- **Docker Compose**: 2.0.0+ (optional)
-- **Memory**: 512MB+ RAM
-- **Storage**: 2GB+ available space
-- **Network**: Stable internet connection
+## Requirements
 
-### Install Docker
+- Docker Engine 24 or later
+- Docker Compose v2 (`docker compose`)
+- Python 3.11 to create the ignored `.env` safely
 
-#### Ubuntu/Debian
-```bash
-# Update package index
-sudo apt update
+## Recommended startup
 
-# Install Docker
-sudo apt install docker.io docker-compose
-
-# Start Docker service
-sudo systemctl start docker
-sudo systemctl enable docker
-
-# Add user to docker group
-sudo usermod -aG docker $USER
-
-# Logout and login again, then test
-docker --version
-```
-
-#### CentOS/RHEL
-```bash
-# Install Docker
-sudo yum install -y docker docker-compose
-
-# Start Docker service
-sudo systemctl start docker
-sudo systemctl enable docker
-
-# Add user to docker group
-sudo usermod -aG docker $USER
-
-# Test installation
-docker --version
-```
-
-## Quick Start
-
-### Method 1: One-Click Start
-```bash
-# Pull and run directly
-docker run -d \
-  --name ntrip-caster \
-  --restart unless-stopped \
-  -p 2101:2101 \
-  -p 5757:5757 \
-  2rtk/ntripcaster:latest
-
-# Check status
-docker ps
-
-# View logs
-docker logs ntrip-caster
-```
-
-### Method 2: Persistent Data Storage
-```bash
-# Create data directory
-mkdir -p data/{logs,data,config}
-
-# Run with volume mounts
-docker run -d \
-  --name ntrip-caster \
-  --restart unless-stopped \
-  -p 2101:2101 \
-  -p 5757:5757 \
-  -v $(pwd)/data/logs:/app/logs \
-  -v $(pwd)/data/data:/app/data \
-  -v $(pwd)/data/config:/app/config \
-  2rtk/ntripcaster:latest
-```
-
-### Method 3: Using Docker Compose
-```bash
-# Download docker-compose.yml
-wget https://raw.githubusercontent.com/Rampump/NTRIPcaster/main/docker-compose.yml
-
-# Start services
-docker-compose up -d
-
-# Check status
-docker-compose ps
-```
-
-## Detailed Installation
-
-### 1. Prepare Working Directory
-```bash
-# Create project directory
-mkdir ntripcaster-docker
-cd ntripcaster-docker
-
-# Create data directories
-mkdir -p data/{logs,data,config}
-```
-
-### 2. Download Configuration Files
-```bash
-# Download docker-compose.yml
-wget https://raw.githubusercontent.com/Rampump/NTRIPcaster/main/docker-compose.yml
-
-# Download environment file
-wget https://raw.githubusercontent.com/Rampump/NTRIPcaster/main/.env.example -O .env
-
-# Download configuration file
-wget https://raw.githubusercontent.com/Rampump/NTRIPcaster/main/config.ini.example -O data/config/config.ini
-```
-
-### 3. Edit Configuration Files
-
-#### Edit .env file
-```bash
-vim .env
-```
-
-Configuration content:
-```ini
-# NTRIP Caster Configuration
-NTRIP_PORT=2101
-WEB_PORT=5757
-DEBUG_MODE=false
-DATABASE_PATH=data/2rtk.db
-SECRET_KEY=your-secret-key-here
-```
-
-#### Edit config.ini file
-```bash
-vim data/config/config.ini
-```
-
-Configuration content:
-```ini
-[server]
-ntrip_port = 2101
-web_port = 5757
-
-[database]
-path = data/2rtk.db
-
-[logging]
-log_dir = logs
-log_level = INFO
-
-[security]
-secret_key = your-secret-key-here   # Must change default key in production
-password_hash_rounds = 12
-```
-
-### 4. Start Container
-
-#### Basic Start
-```bash
-docker run -d \
-  --name ntrip-caster \
-  --restart unless-stopped \
-  -p 2101:2101 \
-  -p 5757:5757 \
-  -v $(pwd)/data/logs:/app/logs \
-  -v $(pwd)/data/data:/app/data \
-  -v $(pwd)/data/config:/app/config \
-  2rtk/ntripcaster:latest
-```
-
-#### Start with Environment Variables
-```bash
-docker run -d \
-  --name ntrip-caster \
-  --restart unless-stopped \
-  -p 2101:2101 \
-  -p 5757:5757 \
-  -e NTRIP_PORT=2101 \
-  -e WEB_PORT=5757 \
-  -e DEBUG_MODE=false \
-  -v $(pwd)/data/logs:/app/logs \
-  -v $(pwd)/data/data:/app/data \
-  -v $(pwd)/data/config:/app/config \
-  2rtk/ntripcaster:latest
-```
-
-## Configuration
-
-### Port Description
-- **2101**: NTRIP service port (standard NTRIP port)
-- **5757**: Web management interface port
-
-### Volume Description
-- `/app/logs`: Log files directory
-- `/app/data`: Database and data files directory
-- `/app/config`: Configuration files directory
-
-### Environment Variables
-- `NTRIP_PORT`: NTRIP service port (default: 2101)
-- `WEB_PORT`: Web service port (default: 5757)
-- `DEBUG_MODE`: Debug mode (default: false)
-- `DATABASE_PATH`: Database path (default: data/2rtk.db)
-- `SECRET_KEY`: Application secret key
-
-## Usage
-
-### 1. Access Web Management Interface
-
-Open browser and visit: `http://localhost:5757`
-
-Default administrator account:
-- Username: `admin`
-- Password: `admin123`
-
-### 2. Add Mount Points
-
-In the web interface:
-1. Login to management interface
-2. Click "Add Mount Point"
-3. Fill in mount point information:
-   - Mount Point Name: e.g., `RTCM3`
-   - Description: Mount point description
-   - Format: Select data format
-
-### 3. Connect NTRIP Client
-
-Use NTRIP client to connect:
-- Server: `your-server-ip`
-- Port: `2101`
-- Mount Point: Your created mount point name
-- Username/Password: Set in management interface
-
-### 4. View Logs
+Linux/macOS:
 
 ```bash
-# View container logs
-docker logs ntrip-caster
-
-# Real-time log viewing
-docker logs -f ntrip-caster
-
-# View application log files
-tail -f data/logs/main.log
+python3 scripts/deployment_config.py prepare-env --env-file .env --example .env.example
+chmod 600 .env
 ```
 
-## Common Issues
-
-### Q1: Container Start Failure - Permission Error
-
-**Problem Description:**
-If you encounter `PermissionError: [Errno 13] Permission denied: '/app/logs/main.log'` error, this is caused by Docker volume permission issues.
-
-**Solution:**
-```bash
-# 1. Stop and remove existing container
-docker-compose down
-docker rm ntrip-caster
-
-# 2. Remove existing data volumes (Note: This will clear all data)
-docker volume rm ntripcaster_ntrip-logs ntripcaster_ntrip-data ntripcaster_ntrip-config
-
-# 3. Rebuild image (if using latest version)
-docker-compose build --no-cache
-
-# 4. Restart services
-docker-compose up -d
-```
-
-**Other startup issue checks:**
-```bash
-# Check container status
-docker ps -a
-
-# View error logs
-docker logs ntrip-caster
-
-# Check port usage
-netstat -tlnp | grep :2101
-netstat -tlnp | grep :5757
-```
-
-### Q2: Cannot Access Web Interface
-
-**Check items:**
-1. Confirm container is running: `docker ps`
-2. Confirm port mapping is correct: `docker port ntrip-caster`
-3. Check firewall settings
-4. Confirm port settings in configuration file
-
-### Q3: NTRIP Client Cannot Connect
-
-**Check items:**
-1. Confirm NTRIP port 2101 is open
-2. Check if mount point is correctly created
-3. Verify username and password
-4. View server logs
-
-### Q4: Data Persistence Issues
-
-**Solution:**
-```bash
-# Ensure data volumes are correctly mounted
-docker inspect ntrip-caster | grep Mounts -A 20
-
-# Check directory permissions
-ls -la data/
-sudo chown -R 1000:1000 data/
-```
-
-## Advanced Configuration
-
-### 1. Using Docker Compose
-
-Create `docker-compose.yml` file:
-
-```yaml
-version: '3.8'
-
-services:
-  ntrip-caster:
-    image: 2rtk/ntripcaster:latest
-    container_name: ntrip-caster
-    restart: unless-stopped
-    ports:
-      - "2101:2101"
-      - "5757:5757"
-    volumes:
-      - ./data/logs:/app/logs
-      - ./data/data:/app/data
-      - ./data/config:/app/config
-    environment:
-      - NTRIP_PORT=2101
-      - WEB_PORT=5757
-      - DEBUG_MODE=false
-    healthcheck:
-      test: ["CMD", "python", "/app/healthcheck.py"]
-      interval: 30s
-      timeout: 15s
-      retries: 3
-      start_period: 90s
-
-  # Optional: Add Nginx reverse proxy
-  nginx:
-    image: nginx:alpine
-    container_name: ntrip-nginx
-    restart: unless-stopped
-    ports:
-      - "80:80"
-      - "443:443"
-    volumes:
-      - ./nginx/nginx.conf:/etc/nginx/nginx.conf
-      - ./nginx/ssl:/etc/nginx/ssl
-    depends_on:
-      - ntrip-caster
-```
-
-Start services:
-```bash
-docker-compose up -d
-```
-
-### 2. Production Environment Deployment
-
-#### Using SSL/TLS
-
-1. Prepare SSL certificates
-2. Configure Nginx reverse proxy
-3. Update firewall rules
-
-#### Monitoring and Logging
+Before the first start, open `.env` in a text editor and set an administrator password known only to the
+operator. Never paste the file into a terminal, log, issue, or chat. Then validate and start the core service:
 
 ```bash
-# Set log rotation
-docker run -d \
-  --name ntrip-caster \
-  --log-driver json-file \
-  --log-opt max-size=10m \
-  --log-opt max-file=3 \
-  # ... other parameters
+docker compose config --quiet
+docker compose up -d ntrip-caster
 ```
 
-### 3. Backup and Recovery
-
-#### Backup Data
-```bash
-# Backup data directory
-tar -czf ntrip-backup-$(date +%Y%m%d).tar.gz data/
-
-# Backup database
-docker exec ntrip-caster sqlite3 /app/data/2rtk.db ".backup /app/data/backup.db"
-```
-
-#### Restore Data
-```bash
-# Stop container
-docker stop ntrip-caster
-
-# Restore data
-tar -xzf ntrip-backup-20231201.tar.gz
-
-# Restart container
-docker start ntrip-caster
-```
-
-### 4. Performance Optimization
-
-#### Resource Limits
-```bash
-docker run -d \
-  --name ntrip-caster \
-  --memory=512m \
-  --cpus=1.0 \
-  # ... other parameters
-```
-
-#### Network Optimization
-```bash
-# Create custom network
-docker network create ntrip-network
-
-# Use custom network
-docker run -d \
-  --name ntrip-caster \
-  --network ntrip-network \
-  # ... other parameters
-```
-
-## Updates and Maintenance
-
-### Update to New Version
+The interactive helper is also available:
 
 ```bash
-# 1. Backup data
-tar -czf backup-$(date +%Y%m%d).tar.gz data/
-
-# 2. Stop and remove old container
-docker stop ntrip-caster
-docker rm ntrip-caster
-
-# 3. Pull new image
-docker pull 2rtk/ntripcaster:latest
-
-# 4. Start new container
-docker run -d \
-  --name ntrip-caster \
-  --restart unless-stopped \
-  -p 2101:2101 \
-  -p 5757:5757 \
-  -v $(pwd)/data/logs:/app/logs \
-  -v $(pwd)/data/data:/app/data \
-  -v $(pwd)/data/config:/app/config \
-  2rtk/ntripcaster:latest
+chmod +x quick-start.sh docker-deploy.sh docker-entrypoint.sh
+./quick-start.sh
 ```
 
-### Health Check
+Windows CMD:
+
+```bat
+docker-deploy.bat --check
+docker-deploy.bat up
+```
+
+`docker-deploy.bat up` creates the ignored `.env` and required directories without printing credentials.
+
+## Ports and listeners
+
+| Service | Container listener | Default host publishing | Notes |
+|---|---|---|---|
+| NTRIP | `0.0.0.0:2101` | `0.0.0.0:2101` | Intended for NTRIP clients; potentially public by default |
+| Web | `0.0.0.0:5757` | `127.0.0.1:5757` | Listens inside the container but is host-local by default |
+| Nginx | Internal HTTP/HTTPS | `127.0.0.1:80/443` | Nginx profile only; harden before publishing |
+| Grafana | Internal service port | `127.0.0.1:3000` | Monitoring profile only |
+| Prometheus | Internal service port | `127.0.0.1:9090` | Monitoring profile only |
+| Redis | Internal service port | `127.0.0.1:6379` | Cache profile only; Redis is not required by the core service |
+
+For remote administration, use a VPN or a hardened reverse proxy with TLS, authentication, and source
+restrictions. Do not publish the Web port globally until those controls are in place.
+
+## Configuration and persistence
+
+- Compose stores `/app/config/config.ini` in the `ntrip-config` volume.
+- Data and logs use the `ntrip-data` and `ntrip-logs` volumes.
+- The first start requires administrator credentials from `.env`. The entrypoint never substitutes a public
+  example value.
+- Existing runtime configuration is not overwritten automatically. Change credentials through the admin UI
+  or an operator-controlled maintenance procedure.
+
+## Monitoring profile
+
+Prepare monitoring credentials before starting the profile:
 
 ```bash
-# Check container health status
-docker ps --format "table {{.Names}}\t{{.Status}}\t{{.Ports}}"
-
-# Manually execute health check
-docker exec ntrip-caster python /app/healthcheck.py
+python3 scripts/deployment_config.py prepare-env --env-file .env --example .env.example --monitoring --profiles monitoring
+docker compose --profile monitoring config --quiet
+docker compose --profile monitoring up -d
 ```
 
-## Technical Support
+Grafana validates its administrator credential at startup. Blank, example, known-default, or short values
+cause it to stop.
 
-If you encounter problems during use, you can:
+## Maps and outbound requests
 
-1. View project documentation: [GitHub Repository](https://github.com/Rampump/NTRIPcaster)
-2. Submit Issue: [GitHub Issues](https://github.com/Rampump/NTRIPcaster/issues)
-3. Contact author: i@jia.by
-4. Visit official website: https://2rtk.com
+- `MAP_PROVIDER=osm` is the default; browsers request tiles from OpenStreetMap.
+- To opt in to Google Maps, set the provider to `google` and place the API key only in the ignored `.env`.
+- Google mode uses the official Maps JavaScript API. A missing key or load failure falls back to OpenStreetMap.
+- Review [Terms of Use](TERMS-OF-USE.md), [Privacy Policy](PRIVACY-POLICY.md), and
+  [Third-Party Notices](THIRD-PARTY-NOTICES.md) before using an external map service.
 
----
+## Operations
 
-**Version Information:** NTRIP Caster v2.2.0  
-**Update Time:** August 2025  
-**Author:** i@jia.by
+```bash
+docker compose ps
+docker compose logs --tail 100 ntrip-caster
+docker compose exec ntrip-caster python /app/healthcheck.py
+docker compose down
+```
+
+Do not publish `.env`, runtime configuration, or full logs. If the first start stops, confirm that `.env`
+exists and that required credentials were safely set, then run `docker compose config --quiet`.

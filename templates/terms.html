@@ -1,0 +1,44 @@
+<!DOCTYPE html>
+<html lang="zh-Hant-TW">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>使用條款 - 2RTK Ntrip Caster</title>
+    <style>
+        body { margin: 0; background: #f4f6f8; color: #243447; font-family: Arial, sans-serif; line-height: 1.7; }
+        main { max-width: 860px; margin: 32px auto; padding: 32px; background: #fff; border-radius: 10px; box-shadow: 0 4px 18px rgba(0,0,0,.08); }
+        h1, h2 { color: #1f4f82; }
+        .draft { padding: 12px 16px; border-left: 4px solid #d97706; background: #fff7ed; }
+        nav { display: flex; gap: 16px; flex-wrap: wrap; margin-top: 28px; }
+        a { color: #1565c0; }
+    </style>
+</head>
+<body>
+<main>
+    <h1>使用條款初稿</h1>
+    <p class="draft">本頁是供實際營運者調整的初稿，未經律師審核，也不是法律意見。公開部署前必須補上營運者名稱、聯絡方式、適用地區及準據法。</p>
+
+    <h2>軟體與營運者</h2>
+    <p>本軟體用於管理 NTRIP／RTCM 連線、帳號、掛載點及基站資訊。實際部署並決定資料用途的一方是服務營運者，而不是因提供原始碼即成為營運者的專案原作者。</p>
+
+    <h2>Google Maps</h2>
+    <p>本軟體包含可選的 Google Maps 功能與內容。啟用後，其使用受 <a href="https://maps.google.com/help/terms_maps/" target="_blank" rel="noopener noreferrer">Google Maps／Google Earth Additional Terms of Service</a>、<a href="https://policies.google.com/terms" target="_blank" rel="noopener noreferrer">Google Terms of Service</a>、<a href="https://cloud.google.com/maps-platform/terms" target="_blank" rel="noopener noreferrer">Google Maps Platform Terms of Service</a>及 <a href="https://policies.google.com/privacy" target="_blank" rel="noopener noreferrer">Google Privacy Policy</a> 約束，並以 Google 官方頁面的最新版本為準。</p>
+    <p>使用者及營運者不得遮蔽、移除或修改 Google 地圖自帶的 Google 標誌、版權、條款或 attribution。</p>
+
+    <h2>OpenStreetMap</h2>
+    <p>OpenStreetMap 是預設底圖及 Google Maps 失敗時的備援；其資料與圖磚服務受 OpenStreetMap 的授權、attribution 及使用政策約束。</p>
+
+    <h2>NTRIP 資料與安全</h2>
+    <p>營運者必須確認有權處理及轉送 NTRIP／RTCM 資料與基站座標，並使用專用強密碼、限制管理來源、保護設定檔與備份。基站座標可能具有營運或安全敏感性。</p>
+
+    <h2>可用性與責任</h2>
+    <p>本軟體依現況提供，不保證無錯誤、不中斷或適合特定用途。第三方地圖及網路服務可能變更、限流或中止。完整初稿請參閱專案根目錄的 TERMS-OF-USE.md。</p>
+
+    <nav aria-label="政策頁面">
+        <a href="{{ url_for('privacy_policy') }}">隱私權政策</a>
+        <a href="{{ url_for('login') }}">返回登入</a>
+        <a href="{{ url_for('index') }}">返回管理介面</a>
+    </nav>
+</main>
+</body>
+</html>

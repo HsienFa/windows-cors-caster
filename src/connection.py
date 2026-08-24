@@ -13,6 +13,7 @@ from dataclasses import dataclass, field, asdict
 from . import config
 from . import logger
 from .logger import log_system_event, log_error, log_warning, log_info, log_debug
+from .network_utils import inspect_established_remote_ips
 from .rtcm2_manager import parser_manager as rtcm_manager  # 导入RTCM2解析管理器
 
 @dataclass
@@ -155,47 +156,37 @@ class ConnectionManager:
         self.print_active_connections()
     
     def cleanup_zombie_connections(self):
-        """清理僵尸连接 - 检查系统层面socket状态"""
-        import subprocess
-        import re
-        
+        """跨平台清理僵尸连接；检查失败时安全跳过。"""
         try:
-            # 获取系统层面的socket连接状态
-            result = subprocess.run(['netstat', '-an'], capture_output=True, text=True, shell=True)
-            if result.returncode != 0:
-                log_warning("无法获取系统socket状态")
-                return
-            
-            # 解析ESTABLISHED连接
-            established_ips = set()
-            for line in result.stdout.split('\n'):
-                if ':2101' in line and 'ESTABLISHED' in line:
-                    # 提取远程IP地址
-                    match = re.search(r'(\d+\.\d+\.\d+\.\d+):(\d+)\s+ESTABLISHED', line)
-                    if match:
-                        remote_ip = match.group(1)
-                        established_ips.add(remote_ip)
-            
+            inspection = inspect_established_remote_ips(config.NTRIP_PORT)
+            if not inspection.success:
+                log_warning(f"無法取得系統 TCP 連線狀態，略過殭屍連線清理：{inspection.error}")
+                return False
+
             # 检查应用层连接状态
             with self.mount_lock:
-                zombie_mounts = []
-                for mount_name, mount_info in self.online_mounts.items():
-                    if mount_info.ip_address not in established_ips:
-                        zombie_mounts.append(mount_name)
-                        log_warning(f"检测到僵尸连接: 挂载点 {mount_name}, IP {mount_info.ip_address}")
-                
-                # 清理僵尸连接
-                for mount_name in zombie_mounts:
-                    log_info(f"清理僵尸连接: {mount_name}")
-                    self.remove_mount_connection(mount_name, "僵尸连接清理")
-                
-                if zombie_mounts:
-                    log_info(f"已清理 {len(zombie_mounts)} 个僵尸连接")
-                else:
-                    log_debug("未发现僵尸连接")
-                    
+                zombie_mounts = [
+                    mount_name
+                    for mount_name, mount_info in self.online_mounts.items()
+                    if mount_info.ip_address not in inspection.remote_ips
+                ]
+
+            for mount_name in zombie_mounts:
+                mount_info = self.online_mounts.get(mount_name)
+                if mount_info:
+                    log_warning(f"偵測到殭屍連線：掛載點 {mount_name}，IP {mount_info.ip_address}")
+                    log_info(f"清理殭屍連線：{mount_name}")
+                    self.remove_mount_connection(mount_name, "殭屍連線清理")
+
+            if zombie_mounts:
+                log_info(f"已清理 {len(zombie_mounts)} 個殭屍連線")
+            else:
+                log_debug("未发现僵尸连接")
+
+            return True
         except Exception as e:
-            log_error(f"清理僵尸连接时发生异常: {e}", exc_info=True)
+            log_error(f"清理殭屍連線時發生例外，已安全略過：{e}", exc_info=True)
+            return False
     
     def add_mount_connection(self, mount_name, ip_address, user_agent="", protocol_version="1.0", client_socket=None):
         """添加挂载点连接上传端"""
@@ -226,14 +217,14 @@ class ConnectionManager:
             # 启动STR修正解析流程
             self.start_str_correction(mount_name)
             
-            log_info(f"挂载点 {mount_name} 已上线，IP: {ip_address}当前在线挂载点数量: {len(self.online_mounts)}")
+            log_info(f"掛載點 {mount_name} 已上線，IP：{ip_address}，目前線上掛載點數量：{len(self.online_mounts)}")
             log_debug(f"挂载点 {mount_name} 连接成功，初始状态: {mount_info.status}, 连接时间: {mount_info.connect_datetime}")
             
             self.print_active_connections()
             
             return True, "Mount point connected successfully"
     
-    def remove_mount_connection(self, mount_name, reason="主动断开"):
+    def remove_mount_connection(self, mount_name, reason="主動中斷連線"):
         """移除挂载点连接（上传端断开）"""
         with self.mount_lock:
             if mount_name in self.online_mounts:
@@ -243,9 +234,9 @@ class ConnectionManager:
                 if mount_info.client_socket:
                     try:
                         mount_info.client_socket.close()
-                        log_info(f"已强制关闭挂载点 {mount_name} 的socket连接")
+                        log_info(f"已強制關閉掛載點 {mount_name} 的 socket 連線")
                     except Exception as e:
-                        log_warning(f"关闭挂载点 {mount_name} socket连接失败: {e}")
+                        log_warning(f"關閉掛載點 {mount_name} 的 socket 連線失敗：{e}")
                 
                 # 记录断开信息
                 log_debug(f"挂载点 {mount_name} 已断开 详情: {reason}, 状态: {mount_info.status}, 总字节数: {mount_info.total_bytes}, 数据速率: {mount_info.data_rate:.2f} B/s")
@@ -253,13 +244,13 @@ class ConnectionManager:
                 
                 # 判断断开原因 用于调试
                 if mount_info.status == "online":
-                    actual_reason = reason if reason != "主动断开" else "正常断开"
+                    actual_reason = reason if reason != "主動中斷連線" else "正常中斷連線"
                 else:
-                    actual_reason = "异常离线"
+                    actual_reason = "異常離線"
                 
                 del self.online_mounts[mount_name]
                 
-                log_info(f"挂载点 {mount_name} 已下线，连接时长: {mount_info.uptime:.1f}秒，原因: {actual_reason}")
+                log_info(f"掛載點 {mount_name} 已離線，連線時間：{mount_info.uptime:.1f} 秒，原因：{actual_reason}")
                 log_debug(f"挂载点 {mount_name} 移除完成，剩余在线挂载点数量: {len(self.online_mounts)}")
                 self.print_active_connections()
                 
@@ -360,7 +351,7 @@ class ConnectionManager:
             self.user_connection_count[username] += 1
             self.mount_connection_count[mount_name] += 1
             
-            log_info(f"用户 {username} IP: {ip_address} 已连接，从挂载点 {mount_name}开始订阅RTCM数据")
+            log_info(f"使用者 {username}（IP：{ip_address}）已連線，開始訂閱掛載點 {mount_name} 的 RTCM 資料")
             log_debug(f"用户连接统计更新 - 用户 {username}: {old_user_count} -> {self.user_connection_count[username]}, 挂载点 {mount_name}: {old_mount_count} -> {self.mount_connection_count[mount_name]}")
             log_debug(f"连接ID生成: {connection_id}, 总在线用户数: {len(self.online_users)}")
             return connection_id
@@ -394,7 +385,7 @@ class ConnectionManager:
                         except:
                             pass
                     
-                    log_info(f"用户 {username} 已从挂载点 {conn['mount_name']} 断开")
+                    log_info(f"使用者 {username} 已中斷與掛載點 {conn['mount_name']} 的連線")
             
 
             for i in reversed(connections_to_remove):
@@ -536,7 +527,7 @@ class ConnectionManager:
                     ]
                     mount_info_str = ';'.join(mount_data)
                     mount_list.append(mount_info_str)
-                    log_info(f"已为挂载点 {mount_name} 创建STR: {mount_info_str}", 'connection_manager')
+                    log_info(f"已為掛載點 {mount_name} 建立 STR：{mount_info_str}", 'connection_manager')
         
         return mount_list
     
@@ -582,7 +573,7 @@ class ConnectionManager:
     def start_str_correction(self, mount_name: str):
         """启动30秒RTCM解析并修正STR"""
         if mount_name not in self.online_mounts:
-            log_warning(f"无法启动STR修正，挂载点 {mount_name} 不在线")
+            log_warning(f"無法啟動 STR 修正，掛載點 {mount_name} 不在線上")
             return
 
         success = rtcm_manager.start_parser(
@@ -592,10 +583,10 @@ class ConnectionManager:
         )
         
         if not success:
-            log_error(f"启动STR修正解析失败 [挂载点: {mount_name}]")
+            log_error(f"啟動 STR 修正解析失敗 [掛載點：{mount_name}]")
             return
             
-        log_info(f"已启动STR修正解析 [挂载点: {mount_name}]，将在30秒后修正STR表")
+        log_info(f"已啟動 STR 修正解析 [掛載點：{mount_name}]，將於 30 秒後修正 STR 資料表")
         
         
         def wait_and_correct():
@@ -611,7 +602,7 @@ class ConnectionManager:
                 
                 self._process_str_data(mount_name, parse_result, mode="correct")
             else:
-                log_warning(f"未获取到STR修正解析结果 [挂载点: {mount_name}]")
+                log_warning(f"未取得 STR 修正解析結果 [掛載點：{mount_name}]")
                 log_debug(f"STR修正失败 - 挂载点: {mount_name}, 可能原因: 解析超时、数据不足或解析器异常")
             
             
@@ -647,18 +638,18 @@ class ConnectionManager:
             elif mode in ["correct", "regenerate"]:
                 
                 if not original_str:
-                    log_warning(f"挂载点 {mount_name} 无初始STR数据，切换到初始生成模式")
+                    log_warning(f"掛載點 {mount_name} 沒有初始 STR 資料，切換為初始產生模式")
                     str_parts = self._create_initial_str_parts(mount_name, parse_result)
                 else:
                     log_debug(f"原始STR [挂载点: {mount_name}]: {original_str}")
                     str_parts = original_str.split(';')
                     if len(str_parts) < 19:
-                        log_error(f"STR格式错误，无法处理 [挂载点: {mount_name}] - 字段数量: {len(str_parts)}, 期望: 19")
+                        log_error(f"STR 格式錯誤，無法處理 [掛載點：{mount_name}] - 欄位數量：{len(str_parts)}，預期：19")
                         return
                     
                     self._update_str_fields(str_parts, parse_result, mode)
             else:
-                log_error(f"未知的STR处理模式: {mode}")
+                log_error(f"未知的 STR 處理模式：{mode}")
                 return
             
             processed_str = ";".join(str_parts)
@@ -673,13 +664,13 @@ class ConnectionManager:
             
             if mode == "correct":
                 if original_str != processed_str:
-                    log_info(f"{mount_name}已修正STR: {processed_str}")
+                    log_info(f"{mount_name} 已修正 STR：{processed_str}")
 
                 else:
-                    log_info(f"STR表修正完成 [挂载点: {mount_name}]，无需更新")
-                    log_info(f"当前STR: {processed_str}")
+                    log_info(f"STR 資料表修正完成 [掛載點：{mount_name}]，不需更新")
+                    log_info(f"目前 STR：{processed_str}")
             elif mode == "initial":
-                log_info(f"[挂载点: {mount_name}]STR已生成: {processed_str}")
+                log_info(f"[掛載點：{mount_name}] STR 已產生：{processed_str}")
             
             log_debug(f"STR处理流程结束 [挂载点: {mount_name}]，模式: {mode}, 最终状态: final_str_generated={mount_info.final_str_generated}")
     

@@ -204,7 +204,7 @@ class RTCMParserThread(threading.Thread):
 
     def run(self):
         """线程主逻辑"""
-        log_info(f"启动解析线程 [挂载点: {self.mount_name}, 模式: {self.mode}]")
+        log_info(f"啟動解析執行緒 [掛載點：{self.mount_name}，模式：{self.mode}]")
         try:
             # 注册数据订阅
             forwarder.register_subscriber(self.mount_name, self.pipe_w)
@@ -215,7 +215,7 @@ class RTCMParserThread(threading.Thread):
             while self.running.is_set():
                 # STR模式超时检查
                 if self.mode == "str_fix" and time.time() - self.start_time > self.duration:
-                    log_info(f"RTCM解析线程已完成 [挂载点: {self.mount_name}, 时长: {self.duration}s]")
+                    log_info(f"RTCM 解析執行緒已完成 [掛載點：{self.mount_name}，時間：{self.duration} 秒]")
                     break
 
                 # 读取并解析消息
@@ -231,7 +231,7 @@ class RTCMParserThread(threading.Thread):
                         self.stats_start_time = current_time  # 重置统计开始时间
                         self.last_stats_time = current_time
                         self.total_bytes = 0  # 重置字节计数
-                        log_info(f"开始统计比特率 [挂载点: {self.mount_name}] - 延迟{self.stats_delay}秒后启用")
+                        log_info(f"開始統計位元率 [掛載點：{self.mount_name}] - 延遲 {self.stats_delay} 秒後啟用")
                     
                     # 更新总字节数（仅在统计启用后）
                     if self.stats_enabled:
@@ -270,16 +270,16 @@ class RTCMParserThread(threading.Thread):
                         # 超时错误只记录调试信息，不记录错误日志
                         continue
                     else:
-                        log_error(f"消息解析错误 [挂载点: {self.mount_name}]: {error_msg}")
+                        log_error(f"訊息解析錯誤 [掛載點：{self.mount_name}]：{error_msg}")
 
         except Exception as e:
-            log_error(f"解析线程异常 [挂载点: {self.mount_name}]: {str(e)}")
+            log_error(f"解析執行緒發生例外 [掛載點：{self.mount_name}]：{str(e)}")
         finally:
             # 清理资源
             forwarder.unregister_subscriber(self.mount_name, self.pipe_w)
             self.pipe_r.close()
             self.pipe_w.close()
-            log_info(f"解析线程停止 [挂载点: {self.mount_name}]")
+            log_info(f"解析執行緒停止 [掛載點：{self.mount_name}]")
 
     def _get_msg_id(self, msg: RTCMMessage) -> Optional[int]:
         """获取消息ID（安全处理）"""
@@ -352,7 +352,7 @@ class RTCMParserThread(threading.Thread):
 
         except Exception as e:
             # print(f"[1005/1006消息] 位置信息解析错误: {str(e)}")
-            log_error(f"位置信息解析错误: {str(e)}")
+            log_error(f"位置資訊解析錯誤：{str(e)}")
 
     def _reverse_geocode(self, lat: float, lon: float, min_population: int = 10000) -> Tuple[Optional[str], Optional[str], Optional[str]]:
         """
@@ -371,7 +371,7 @@ class RTCMParserThread(threading.Thread):
             # 对于单个坐标，使用get方法而不是search方法
             result = reverse_geocode.get((lat, lon), min_population=min_population)
             if not result:
-                log_warning(f"地理编码查询无结果: lat={lat}, lon={lon}")
+                log_warning(f"地理編碼查詢沒有結果：lat={lat}, lon={lon}")
                 return None, None, None
             
             # 提取所需字段（处理可能的缺失值）
@@ -380,10 +380,10 @@ class RTCMParserThread(threading.Thread):
             city_name = result.get("city")
             return country_code, country_name, city_name
         except ImportError:
-            log_warning("未安装reverse_geocode库，请先执行：pip install reverse-geocode")
+            log_warning("尚未安裝 reverse_geocode 程式庫，請先執行：pip install reverse-geocode")
             return None, None, None
         except Exception as e:
-            log_warning(f"地理编码查询失败: {str(e)}")
+            log_warning(f"地理編碼查詢失敗：{str(e)}")
             return None, None, None
 
     # -------------------------- 1033消息处理函数 --------------------------
@@ -473,7 +473,7 @@ class RTCMParserThread(threading.Thread):
 
         except Exception as e:
             # print(f"[1033消息] 设备信息解析错误: {str(e)}")
-            log_error(f"设备信息解析错误: {str(e)}")
+            log_error(f"裝置資訊解析錯誤：{str(e)}")
 
     # -------------------------- 比特率统计函数 --------------------------
     def _calculate_bitrate(self) -> None:
@@ -646,14 +646,14 @@ class RTCMParserThread(threading.Thread):
                     **data  # 展开data字典的内容到顶层
                 })
             except Exception as e:
-                log_error(f"数据推送失败: {str(e)}")
+                log_error(f"資料推送失敗：{str(e)}")
 
     # -------------------------- 线程控制 --------------------------
     def stop(self) -> None:
         """停止解析线程"""
         self.running.clear()
         self.join(timeout=5)
-        log_info(f"[挂载点: {self.mount_name}解析线程已关闭]")
+        log_info(f"[掛載點：{self.mount_name}，解析執行緒已關閉]")
 
 
 # -------------------------- 解析接口 --------------------------

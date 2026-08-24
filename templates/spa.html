@@ -1,13 +1,12 @@
 <!DOCTYPE html>
-<html lang="en">
+<html lang="zh-Hant-TW">
 <head>
-    <meta charset="utf-8">
+    <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>2RTK NTRIP Caster</title>
-    <script src="https://cdnjs.cloudflare.com/ajax/libs/socket.io/4.0.1/socket.io.js"></script>
-    <!-- 地图库 -->
-    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/ol@v8.2.0/ol.css" type="text/css">
-    <script src="https://cdn.jsdelivr.net/npm/ol@v8.2.0/dist/ol.js"></script>
+    <!-- 本機地圖程式庫 -->
+    <link rel="stylesheet" href="/static/vendor/openlayers/8.2.0/ol.css" type="text/css">
+    <script src="/static/vendor/openlayers/8.2.0/ol.js"></script>
     
     <style>
         * {
@@ -1032,30 +1031,75 @@
             height: 100%;
         }
 
-        .map-overlay {
+        .map-tile-error {
             position: absolute;
-            top: 0;
-            left: 0;
-            right: 0;
-            bottom: 0;
-            background: #f8f9fa;
-            display: flex;
-            flex-direction: column;
-            align-items: center;
-            justify-content: center;
-            color: #6c757d;
-            font-size: 1.1rem;
+            right: 1rem;
+            bottom: 1rem;
+            left: 1rem;
+            z-index: 1000;
+            padding: 0.75rem 1rem;
+            border: 1px solid #f0ad4e;
+            border-radius: 6px;
+            background: rgba(255, 248, 225, 0.96);
+            color: #7a4d00;
+            box-shadow: 0 2px 8px rgba(0, 0, 0, 0.2);
+            text-align: center;
         }
 
-        .map-overlay i {
-            font-size: 3rem;
-            margin-bottom: 1rem;
-            opacity: 0.5;
+        .map-tile-error[hidden] {
+            display: none;
         }
 
-        .map-switch {
-            display: flex;
-            gap: 0.25rem;
+        .map-empty-state {
+            position: absolute;
+            top: 1rem;
+            left: 50%;
+            z-index: 900;
+            max-width: calc(100% - 2rem);
+            padding: 0.5rem 0.85rem;
+            transform: translateX(-50%);
+            border-radius: 6px;
+            background: rgba(255, 255, 255, 0.92);
+            color: #495057;
+            box-shadow: 0 2px 8px rgba(0, 0, 0, 0.18);
+            text-align: center;
+            pointer-events: none;
+        }
+
+        .map-empty-state[hidden] {
+            display: none;
+        }
+
+        .map-provider-label {
+            padding: 0.25rem 0.6rem;
+            border-radius: 999px;
+            background: #e9ecef;
+            color: #495057;
+            font-size: 0.8rem;
+            font-weight: 600;
+        }
+
+        .map-marker-popup {
+            min-width: 220px;
+            padding: 0.75rem;
+            border: 1px solid #ced4da;
+            border-radius: 6px;
+            background: white;
+            color: #212529;
+            box-shadow: 0 3px 12px rgba(0, 0, 0, 0.28);
+            font-size: 0.85rem;
+        }
+
+        .map-marker-popup[hidden] {
+            display: none;
+        }
+
+        .map-marker-popup-row + .map-marker-popup-row {
+            margin-top: 0.25rem;
+        }
+
+        .map-marker-popup-label {
+            font-weight: 700;
         }
 
         .satellite-container {
@@ -1415,65 +1459,6 @@
             border-radius: 4px;
         }
         
-        #map-switch {
-            background: rgba(255, 255, 255, 0.9);
-            border-radius: 6px;
-            padding: 8px;
-            box-shadow: 0 2px 4px rgba(0,0,0,0.1);
-        }
-        
-        .map-switch-floating {
-            position: absolute;
-            top: 10px;
-            right: 10px;
-            z-index: 1000;
-            background: transparent;
-            border-radius: 8px;
-            padding: 6px;
-            display: flex;
-            gap: 8px;
-        }
-        
-        #map-switch .btn, .map-switch-floating .btn {
-            margin: 0;
-            font-size: 12px;
-            padding: 8px 12px;
-            font-weight: 600;
-            min-width: 80px;
-            border: 1px solid rgba(255,255,255,0.3);
-            transition: all 0.3s ease;
-            backdrop-filter: blur(10px);
-            box-shadow: 0 2px 8px rgba(0,0,0,0.2);
-            text-transform: none !important;
-        }
-        
-        .map-switch-floating .btn:hover {
-            transform: translateY(-2px);
-            box-shadow: 0 4px 16px rgba(0,0,0,0.3);
-            backdrop-filter: blur(15px);
-        }
-        
-        .map-switch-floating .btn-primary {
-            background: rgba(52, 152, 219, 0.3);
-            color: white;
-            text-shadow: 1px 1px 2px rgba(0,0,0,0.8);
-        }
-        
-        .map-switch-floating .btn-secondary {
-            background: rgba(108, 117, 125, 0.3);
-            color: white;
-            text-shadow: 1px 1px 2px rgba(0,0,0,0.8);
-        }
-        
-        .map-switch-floating .btn-primary:hover {
-            background: rgba(52, 152, 219, 0.6);
-        }
-        
-        .map-switch-floating .btn-secondary:hover {
-            background: rgba(108, 117, 125, 0.6);
-        }
-        
-        
         .constellation-container {
             margin-bottom: 20px;
             border: 1px solid #ddd;
@@ -1574,7 +1559,13 @@
         }
     </style>
 </head>
-<body>
+<body
+    data-map-provider="{{ map_provider or 'osm' }}"
+    data-google-maps-enabled="{{ 'true' if google_maps_enabled else 'false' }}"
+    data-map-default-latitude="{{ map_default_latitude if map_default_latitude is defined else 23.7 }}"
+    data-map-default-longitude="{{ map_default_longitude if map_default_longitude is defined else 121.0 }}"
+    data-map-default-zoom="{{ map_default_zoom if map_default_zoom is defined else 7 }}"
+>
     <div class="container">
         <!-- 顶部标题 -->
         <div class="header">
@@ -1584,12 +1575,12 @@
         <!-- 导航栏 -->
         <nav class="navbar">
             <div class="nav-container">
-                <a href="#" class="nav-item active" data-page="dashboard" onclick="navigateTo('dashboard')">Home</a>
-                <a href="#" class="nav-item" data-page="users" onclick="navigateTo('users')">User Mgmt</a>
-                <a href="#" class="nav-item" data-page="mounts" onclick="navigateTo('mounts')">Mount Mgmt</a>
-                <a href="#" class="nav-item" data-page="monitor" onclick="navigateTo('monitor')">Sources</a>
-                <a href="#" class="nav-item" data-page="settings" onclick="navigateTo('settings')">Settings</a>
-                <a href="#" class="nav-item" onclick="logout()">Logout</a>
+                <a href="#" class="nav-item active" data-page="dashboard" onclick="navigateTo('dashboard')">首頁</a>
+                <a href="#" class="nav-item" data-page="users" onclick="navigateTo('users')">使用者管理</a>
+                <a href="#" class="nav-item" data-page="mounts" onclick="navigateTo('mounts')">掛載點管理</a>
+                <a href="#" class="nav-item" data-page="monitor" onclick="navigateTo('monitor')">基站監控</a>
+                <a href="#" class="nav-item" data-page="settings" onclick="navigateTo('settings')">系統設定</a>
+                <a href="#" class="nav-item" onclick="logout()">登出</a>
             </div>
         </nav>
 
@@ -1604,10 +1595,10 @@
 
             
             <div class="content-panel" id="log-panel">
-                <h3 style="margin-bottom: 1rem; color: #2c3e50;">System Logs</h3>
+                <h3 style="margin-bottom: 1rem; color: #2c3e50;">系統日誌</h3>
                 <div class="log-terminal" id="log-terminal">
-                    <div class="log-line info">[INFO] 2RTK Ntrip Caster started successfully</div>
-                    <div class="log-line info">[INFO] Web management interface started</div>
+                    <div class="log-line info">[INFO] 2RTK Ntrip Caster 啟動成功</div>
+                    <div class="log-line info">[INFO] 網頁管理介面已啟動</div>
                 </div>
             </div>
         </main>
@@ -1618,14 +1609,25 @@
                 <span id="app-name">{{ app_name or '2RTK Ntrip Caster' }}</span> 
                 <span id="app-version">v{{ app_version or '2.2.0' }}</span> | 
                 © {{ current_year or 2025 }} <span id="app-author">2RTK </span> | 
-                Contact: <a href="mailto:{{ contact_email or 'i@jia.by' }}" id="app-contact">{{ contact_email or 'i@jia.by' }}</a> | 
-                Website: <a href="https://{{ website_url or '2RTK.COM' }}" id="app-website" target="_blank">{{ website_url or '2RTK.COM' }}</a>
+                聯絡信箱：<a href="mailto:{{ contact_email or 'i@jia.by' }}" id="app-contact">{{ contact_email or 'i@jia.by' }}</a> |
+                網站：<a href="https://{{ website_url or '2RTK.COM' }}" id="app-website" target="_blank" rel="noopener noreferrer">{{ website_url or '2RTK.COM' }}</a> |
+                <a href="{{ url_for('terms_of_use') }}">使用條款</a> |
+                <a href="{{ url_for('privacy_policy') }}">隱私權政策</a>
             </div>
         </footer>
     </div>
 
-    <script src="https://cdn.socket.io/4.0.0/socket.io.min.js"></script>
+    <script src="/static/vendor/socket.io-client/4.0.1/socket.io.min.js"></script>
     <script src="/static/app.js"></script>
+    {% if google_maps_script_url %}
+    <script
+        id="google-maps-api"
+        src="{{ google_maps_script_url }}"
+        async
+        referrerpolicy="origin"
+        onerror="window.googleMapsApiFailed && window.googleMapsApiFailed()"
+    ></script>
+    {% endif %}
     
 </body>
 </html>

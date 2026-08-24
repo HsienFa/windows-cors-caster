@@ -50,11 +50,11 @@ function updateConnectionStatus() {
     const statusElement = document.getElementById('connection-status');
     if (statusElement) {
         const statusText = {
-        'connecting': 'Connecting...',
-        'connected': 'Connected',
-        'disconnected': 'Disconnected',
-        'reconnecting': 'Reconnecting...',
-        'failed': 'Connection Failed'
+        'connecting': '連線中...',
+        'connected': '已連線',
+        'disconnected': '已中斷連線',
+        'reconnecting': '重新連線中...',
+        'failed': '連線失敗'
     };
         const statusColor = {
             'connecting': '#ffd93d',
@@ -63,7 +63,7 @@ function updateConnectionStatus() {
             'reconnecting': '#ffd93d',
             'failed': '#ff6b6b'
         };
-        statusElement.textContent = statusText[connectionStatus] || 'Unknown Status';
+        statusElement.textContent = statusText[connectionStatus] || '未知狀態';
         statusElement.style.color = statusColor[connectionStatus] || '#adb5bd';
     }
 }
@@ -91,6 +91,10 @@ function navigateTo(page) {
 
 // Execute actual page navigation
 function performNavigation(page) {
+    if (currentPage === 'monitor' && page !== 'monitor') {
+        destroyCurrentMap();
+    }
+
     // Update navigation state
     document.querySelectorAll('.nav-item').forEach(item => {
         item.classList.remove('active');
@@ -130,7 +134,7 @@ async function checkLoginStatus() {
     try {
         const response = await fetch('/api/users');
         if (response.status === 401) {
-            showAlert('Login expired, please log in again', 'warning');
+            showAlert('登入狀態已過期，請重新登入', 'warning');
             window.location.href = '/login';
             return false;
         }
@@ -145,14 +149,14 @@ async function checkLoginStatus() {
 async function handleApiResponse(response, skipAuthRedirect = false) {
     if (response.status === 401) {
         if (!skipAuthRedirect) {
-            showAlert('Login expired, please log in again', 'warning');
+            showAlert('登入狀態已過期，請重新登入', 'warning');
             window.location.href = '/login';
         }
-        throw new Error('Unauthorized access');
+        throw new Error('未授權存取');
     }
     
     if (!response.ok) {
-        const errorData = await response.json().catch(() => ({ error: 'Unknown error' }));
+        const errorData = await response.json().catch(() => ({ error: '未知錯誤' }));
         throw new Error(errorData.error || `HTTP ${response.status}`);
     }
     
@@ -215,7 +219,7 @@ async function loadPageContent(page) {
         }
     } catch (error) {
         // console.error('Failed to load page content:', error);
-        contentDiv.innerHTML = '<div class="error-message">Failed to load page content, please try again later.</div>';
+        contentDiv.innerHTML = '<div class="error-message">無法載入頁面內容，請稍後再試。</div>';
     }
 }
 
@@ -234,7 +238,7 @@ function addInfoButtonsToSTRItems() {
             return;
         }
         
-        button.title = `View real-time RTCM parsing for ${mountName}`;
+        button.title = `檢視 ${mountName} 的即時 RTCM 解析資料`;
         
         button.addEventListener('click', () => {
             // Start RTCM parsing and update container content
@@ -253,13 +257,15 @@ let lastPosition = { latitude: null, longitude: null };
 let mapCenter = { latitude: null, longitude: null };
 // Track if this is the first marking
 let isFirstMarking = true;
-// Track if map was switched to force re-marking
-let mapSwitched = false;
 // Store current mount name for map display
 let currentMountName = null;
+// Store the display name separately from the mount point identifier.
+let currentStationName = null;
 
 function startRTCMParsing(mountName) {
-    console.log(`[前端] 开始启动RTCM解析: ${mountName}`);
+    console.log(`[前端] 開始啟動 RTCM 解析：${mountName}`);
+    currentMountName = mountName;
+    currentStationName = mountName;
     
     // 
     fetch('/api/mount/rtcm-parse/status')
@@ -267,24 +273,24 @@ function startRTCMParsing(mountName) {
     .then(statusData => {
         if (statusData.success) {
             const status = statusData.status;
-            console.log(`[前端] 当前解析器状态:`, status);
-            console.log(`[前端] 当前活跃Web挂载点: ${status.current_web_mount || '无'}`);
-            console.log(`[前端] Web解析线程数: ${status.web_parsers}, STR解析线程数: ${status.str_parsers}`);
+            console.log(`[前端] 目前解析器狀態：`, status);
+            console.log(`[前端] 目前作用中的 Web 掛載點：${status.current_web_mount || '無'}`);
+            console.log(`[前端] Web 解析執行緒數：${status.web_parsers}, STR 解析執行緒數：${status.str_parsers}`);
             
             if (status.current_web_mount && status.current_web_mount !== mountName) {
-                console.log(`[前端] 检测到前一个活跃挂载点: ${status.current_web_mount}，将被自动清理`);
+                console.log(`[前端] 偵測到前一個作用中的掛載點：${status.current_web_mount}，將自動清理`);
             }
         }
     })
     .catch(error => {
-        console.warn(`[前端] 获取解析器状态失败:`, error);
+        console.warn(`[前端] 取得解析器狀態失敗：`, error);
     });
     
     // Reset marking status for new mount point
     isFirstMarking = true;
-    mapSwitched = false;
     lastPosition = { latitude: null, longitude: null };
     mapCenter = { latitude: null, longitude: null };
+    clearCurrentMapMarker();
     
     // Update base station information container
     updateStationInfo(mountName);
@@ -293,7 +299,7 @@ function startRTCMParsing(mountName) {
     initializeSatelliteVisualization();
     
     // Call backend API to start RTCM parsing
-    console.log(`[前端] 调用后端API启动RTCM解析: ${mountName}`);
+    console.log(`[前端] 呼叫後端 API 啟動 RTCM 解析：${mountName}`);
     fetch(`/api/mount/${mountName}/rtcm-parse/start`, {
         method: 'POST',
         headers: {
@@ -303,26 +309,26 @@ function startRTCMParsing(mountName) {
     .then(response => response.json())
     .then(data => {
         if (data.success) {
-            console.log(`[前端] RTCM解析启动成功: ${mountName}`);
+            console.log(`[前端] RTCM 解析啟動成功：${mountName}`);
             // 
             setTimeout(() => {
                 fetch('/api/mount/rtcm-parse/status')
                 .then(response => response.json())
                 .then(statusData => {
                     if (statusData.success) {
-                        console.log(`[前端] 启动后解析器状态:`, statusData.status);
+                        console.log(`[前端] 啟動後的解析器狀態：`, statusData.status);
                     }
                 })
-                .catch(error => console.warn(`[前端] 获取启动后状态失败:`, error));
+                .catch(error => console.warn(`[前端] 取得啟動後狀態失敗：`, error));
             }, 1000);
         } else {
-            console.error(`[前端] RTCM解析启动失败: ${data.error || 'Unknown error'}`);
-            showAlert(`Failed to start RTCM parsing: ${data.error || 'Unknown error'}`, 'error');
+            console.error(`[前端] RTCM 解析啟動失敗：${data.error || '未知錯誤'}`);
+            showAlert(`無法啟動 RTCM 解析：${data.error || '未知錯誤'}`, 'error');
         }
     })
     .catch(error => {
-        console.error('[前端] 调用RTCM解析API失败:', error);
-        showAlert('Failed to call RTCM parsing API', 'error');
+        console.error('[前端] 呼叫 RTCM 解析 API 失敗：', error);
+        showAlert('無法呼叫 RTCM 解析 API', 'error');
     });
 }
 
@@ -340,23 +346,14 @@ function calculateDistance(lat1, lon1, lat2, lon2) {
 
 // Handle position updates, determine if re-marking is needed
 function handlePositionUpdate(latitude, longitude, mountName = null) {
-    // Force re-marking if map was switched
-    if (mapSwitched) {
-        mapSwitched = false;
-        lastPosition.latitude = latitude;
-        lastPosition.longitude = longitude;
-        updateMapLocation(latitude, longitude, mountName, false); // Second marking, don't fix zoom
-        return;
-    }
-    
-    // First time marking - always mark and set zoom to 8
+    // First time marking - always mark and use the configured zoom.
     if (isFirstMarking) {
         isFirstMarking = false;
         lastPosition.latitude = latitude;
         lastPosition.longitude = longitude;
         mapCenter.latitude = latitude;
         mapCenter.longitude = longitude;
-        updateMapLocation(latitude, longitude, mountName, true); // First marking, set zoom to 8
+        updateMapLocation(latitude, longitude, mountName, true);
         return;
     }
     
@@ -395,20 +392,30 @@ function handlePositionUpdate(latitude, longitude, mountName = null) {
         }
     }
     
-    // Check if marker is visible in current map view
+    // Check if marker is visible in the active map provider.
     if (currentMap && !shouldUpdateMarker) {
-        const view = currentMap.getView();
-        const extent = view.calculateExtent(currentMap.getSize());
-        const markerCoord = ol.proj.fromLonLat([longitude, latitude]);
-        
-        // If marker is not within current view extent, should update marker
-        if (!ol.extent.containsCoordinate(extent, markerCoord)) {
-            shouldUpdateMarker = true;
-            updateReason = 'marker not visible in current map view';
-            // Update map center to current marker position
-            const currentCenter = ol.proj.toLonLat(view.getCenter());
-            mapCenter.latitude = currentCenter[1];
-            mapCenter.longitude = currentCenter[0];
+        if (activeMapProvider === 'osm' && typeof ol !== 'undefined') {
+            const view = currentMap.getView();
+            const extent = view.calculateExtent(currentMap.getSize());
+            const markerCoord = ol.proj.fromLonLat([longitude, latitude]);
+            if (!ol.extent.containsCoordinate(extent, markerCoord)) {
+                shouldUpdateMarker = true;
+                updateReason = 'marker not visible in OpenStreetMap view';
+                const currentCenter = ol.proj.toLonLat(view.getCenter());
+                mapCenter.latitude = currentCenter[1];
+                mapCenter.longitude = currentCenter[0];
+            }
+        } else if (activeMapProvider === 'google') {
+            const bounds = currentMap.getBounds();
+            if (bounds && !bounds.contains({ lat: Number(latitude), lng: Number(longitude) })) {
+                shouldUpdateMarker = true;
+                updateReason = 'marker not visible in Google Maps view';
+                const currentCenter = currentMap.getCenter();
+                if (currentCenter) {
+                    mapCenter.latitude = currentCenter.lat();
+                    mapCenter.longitude = currentCenter.lng();
+                }
+            }
         }
     }
     
@@ -423,7 +430,7 @@ function handlePositionUpdate(latitude, longitude, mountName = null) {
     // Update position and mark
     lastPosition.latitude = latitude;
     lastPosition.longitude = longitude;
-    updateMapLocation(latitude, longitude, mountName, false); // Subsequent marking, don't fix zoom
+    updateMapLocation(latitude, longitude, mountName, false);
 }
 
 // Update base station information
@@ -431,7 +438,7 @@ function updateStationInfo(mountName) {
     const stationInfoDiv = document.getElementById('station-info');
     stationInfoDiv.innerHTML = `
         <div class="station-info-loading">
-            <p>Parsing RTCM data for ${mountName}...</p>
+            <p>正在解析 ${mountName} 的 RTCM 資料...</p>
             <div class="loading-spinner"></div>
         </div>
     `;
@@ -442,45 +449,48 @@ function updateStationInfo(mountName) {
 // Display base station information
 function displayStationInfo(stationData) {
     const stationInfoDiv = document.getElementById('station-info');
+    const stationMountName = stationData.mount_name || stationData.mount || currentMountName || stationData.name || '未知';
+    currentMountName = stationMountName;
+    currentStationName = stationData.station_name || stationData.site_name || stationData.name || stationData.id || stationMountName;
     stationInfoDiv.innerHTML = `
         <div class="station-details">
             <!-- 第一行：基本信息 -->
             <div class="info-row-group">
                 <div class="info-row">
-                    <span class="info-label">Mount Point:</span>
-                    <span class="info-value" id="station-name">${stationData.name || 'Unknown'}</span>
+                    <span class="info-label">掛載點：</span>
+                    <span class="info-value" id="station-name">${stationMountName}</span>
                 </div>
                 <div class="info-row">
-                    <span class="info-label">Station ID:</span>
-                    <span class="info-value" id="station-id">${stationData.id || 'Unknown'}</span>
+                    <span class="info-label">基站 ID：</span>
+                    <span class="info-value" id="station-id">${stationData.id || '未知'}</span>
                 </div>
                 <div class="info-row">
-                    <span class="info-label">Country:</span>
-                    <span class="info-value" id="station-country">${stationData.country_name || 'Unknown'}</span>
+                    <span class="info-label">國家：</span>
+                    <span class="info-value" id="station-country">${stationData.country_name || '未知'}</span>
                 </div>
                 <div class="info-row">
-                    <span class="info-label">City:</span>
-                    <span class="info-value" id="station-city">${stationData.city || 'Unknown'}</span>
+                    <span class="info-label">城市：</span>
+                    <span class="info-value" id="station-city">${stationData.city || '未知'}</span>
                 </div>
             </div>
             
             <!-- 第二行：设备信息 -->
             <div class="info-row-group">
                 <div class="info-row">
-                    <span class="info-label">Receiver Type:</span>
-                    <span class="info-value" id="receiver-type">${stationData.receiver?.name || 'Unknown'}</span>
+                    <span class="info-label">接收器型號：</span>
+                    <span class="info-value" id="receiver-type">${stationData.receiver?.name || '未知'}</span>
                 </div>
                 <div class="info-row">
-                    <span class="info-label">Receiver Firmware:</span>
-                    <span class="info-value" id="receiver-version">${stationData.receiver?.firmware || 'Unknown'}</span>
+                    <span class="info-label">接收器韌體：</span>
+                    <span class="info-value" id="receiver-version">${stationData.receiver?.firmware || '未知'}</span>
                 </div>
                 <div class="info-row">
-                    <span class="info-label">Antenna Type:</span>
-                    <span class="info-value" id="antenna-type">${stationData.antenna?.name || 'Unknown'}</span>
+                    <span class="info-label">天線型號：</span>
+                    <span class="info-value" id="antenna-type">${stationData.antenna?.name || '未知'}</span>
                 </div>
                 <div class="info-row">
-                    <span class="info-label">Antenna Serial:</span>
-                    <span class="info-value" id="antenna-serial">${stationData.antenna?.serial || 'Unknown'}</span>
+                    <span class="info-label">天線序號：</span>
+                    <span class="info-value" id="antenna-serial">${stationData.antenna?.serial || '未知'}</span>
                 </div>
             </div>
             
@@ -488,8 +498,8 @@ function displayStationInfo(stationData) {
             <div class="info-row-group coordinates-group">
                 <div class="coordinates-half">
                     <div class="info-row">
-                        <span class="info-label">Coordinates:</span>
-                        <span class="info-value">Longitude: <span id="station-longitude">${stationData.longitude || 0}</span>°, Latitude: <span id="station-latitude">${stationData.latitude || 0}</span>°, Height: <span id="station-height">${stationData.height || 'Unknown'}</span></span>
+                        <span class="info-label">座標：</span>
+                        <span class="info-value">經度：<span id="station-longitude">${stationData.longitude || 0}</span>°，緯度：<span id="station-latitude">${stationData.latitude || 0}</span>°，高度：<span id="station-height">${stationData.height || '未知'}</span></span>
                     </div>
                 </div>
                 <div class="coordinates-half">
@@ -504,365 +514,489 @@ function displayStationInfo(stationData) {
     
     // Update base station status
     updateStationStatus(true);
-    
-    // Hide map loading overlay
-    const mapOverlay = document.getElementById('map-loading');
-    if (mapOverlay) {
-        mapOverlay.style.display = 'none';
-    }
+    refreshCurrentMapMarkerDetails();
 }
 
 // Map related variables
+function parseMapSetting(value, fallback, minimum, maximum) {
+    const parsed = Number(value);
+    if (!Number.isFinite(parsed)) return fallback;
+    return Math.min(maximum, Math.max(minimum, parsed));
+}
+
+function readMapRuntimeConfig() {
+    const dataset = document.body ? document.body.dataset : {};
+    return {
+        provider: dataset.mapProvider === 'google' ? 'google' : 'osm',
+        googleEnabled: dataset.googleMapsEnabled === 'true',
+        defaultLatitude: parseMapSetting(dataset.mapDefaultLatitude, 23.7, -90, 90),
+        defaultLongitude: parseMapSetting(dataset.mapDefaultLongitude, 121.0, -180, 180),
+        defaultZoom: parseMapSetting(dataset.mapDefaultZoom, 7, 1, 22)
+    };
+}
+
+const mapRuntimeConfig = readMapRuntimeConfig();
 let currentMap = null;
-let mapType = 'amap'; // 'amap' or 'osm'
-let stationMarker = null;
-let coverageCircles = [];
+let activeMapProvider = null;
+let osmMarkerLayer = null;
+let osmPopupOverlay = null;
+let googleMarker = null;
+let googleInfoWindow = null;
+let googleCoverageCircles = [];
+let googleMapsReady = false;
+let googleMapsFailed = false;
+let currentMarkerDetails = null;
 
-// Initialize map
-function initializeMap() {
-    // Set map switch button events
-    const amapBtn = document.getElementById('amap-btn');
-    const osmBtn = document.getElementById('osm-btn');
-    
-    amapBtn.addEventListener('click', () => switchToAmap());
-    osmBtn.addEventListener('click', () => switchToOSM());
-    
-    // Load map library by default
-    loadMapLibrary();
-    
-    // Position data is now updated through simulated data
-}
+window.googleMapsApiReady = function() {
+    googleMapsReady = true;
+    googleMapsFailed = false;
 
-// Initialize map specifically for monitor page
-function initializeMapForMonitor() {
-    console.log('[地图初始化] 开始初始化monitor页面地图');
-    
-    // Check if we're on monitor page and map container exists
-    if (currentPage !== 'monitor') {
-        console.log('[地图初始化] 不在monitor页面，跳过地图初始化');
-        return;
-    }
-    
-    const mapContainer = document.getElementById('map');
-    if (!mapContainer) {
-        console.log('[地图初始化] 地图容器不存在，跳过初始化');
-        return;
-    }
-    
-    // Set map switch button events (re-bind after page reload)
-    const amapBtn = document.getElementById('amap-btn');
-    const osmBtn = document.getElementById('osm-btn');
-    
-    if (amapBtn && osmBtn) {
-        // Remove existing event listeners to avoid duplicates
-        amapBtn.replaceWith(amapBtn.cloneNode(true));
-        osmBtn.replaceWith(osmBtn.cloneNode(true));
-        
-        // Re-get elements after replacement
-        const newAmapBtn = document.getElementById('amap-btn');
-        const newOsmBtn = document.getElementById('osm-btn');
-        
-        newAmapBtn.addEventListener('click', () => switchToAmap());
-        newOsmBtn.addEventListener('click', () => switchToOSM());
-        
-        console.log('[地图初始化] 地图切换按钮事件已重新绑定');
-    }
-    
-    // Force re-initialize map
-    if (typeof ol !== 'undefined') {
-        console.log('[地图初始化] OpenLayers已加载，直接初始化地图');
-        initMap();
-        
-        // If we have previous position data, restore the marker
-        if (lastPosition.latitude !== null && lastPosition.longitude !== null) {
-            console.log('[地图初始化] 恢复之前的位置标记:', lastPosition);
-            // Force re-marking without distance check
-            updateMapLocation(lastPosition.latitude, lastPosition.longitude, currentMountName, false);
+    if (currentPage === 'monitor' && mapRuntimeConfig.provider === 'google') {
+        if (initializeGoogleMap()) {
+            restoreLastMapLocation(false);
+        } else {
+            fallbackToOpenStreetMap('Google 地圖無法初始化，已切換至 OpenStreetMap。');
         }
-    } else {
-        console.log('[地图初始化] OpenLayers未加载，开始加载库');
-        loadMapLibrary();
     }
+};
+
+window.googleMapsApiFailed = function() {
+    googleMapsReady = false;
+    googleMapsFailed = true;
+    fallbackToOpenStreetMap('Google 地圖載入失敗，已切換至 OpenStreetMap。');
+};
+
+window.gm_authFailure = function() {
+    googleMapsReady = false;
+    googleMapsFailed = true;
+    fallbackToOpenStreetMap('Google 地圖驗證失敗，已切換至 OpenStreetMap。');
+};
+
+function showMapStatusMessage(message) {
+    const messageElement = document.getElementById('map-tile-error');
+    if (!messageElement) return;
+
+    messageElement.textContent = message;
+    messageElement.hidden = false;
 }
 
-// Load OpenLayers map library
-function loadMapLibrary() {
-    if (typeof ol === 'undefined') {
-        // Dynamically load OpenLayers CSS
-        const link = document.createElement('link');
-        link.rel = 'stylesheet';
-        link.href = 'https://cdn.jsdelivr.net/npm/ol@v7.5.2/ol.css';
-        document.head.appendChild(link);
-        
-        // Dynamically load OpenLayers JS
-        const script = document.createElement('script');
-        script.src = 'https://cdn.jsdelivr.net/npm/ol@v7.5.2/dist/ol.js';
-        script.onload = () => initMap();
-        document.head.appendChild(script);
-    } else {
-        initMap();
-    }
+function hideMapStatusMessage() {
+    const messageElement = document.getElementById('map-tile-error');
+    if (!messageElement) return;
+
+    messageElement.hidden = true;
 }
 
-// Initialize map
-function initMap() {
-    console.log('[地图初始化] 开始创建地图实例');
-    
-    // Check if map container exists
-    const mapContainer = document.getElementById('map');
-    if (!mapContainer) {
-        console.log('[地图初始化] 地图容器不存在，无法创建地图');
-        return;
-    }
-    
-    // Clean up existing map
-    if (currentMap) {
-        console.log('[地图初始化] 清理现有地图实例');
+function showMapEmptyState() {
+    const emptyState = document.getElementById('map-empty-state');
+    if (emptyState) emptyState.hidden = false;
+}
+
+function hideMapEmptyState() {
+    const emptyState = document.getElementById('map-empty-state');
+    if (emptyState) emptyState.hidden = true;
+}
+
+function updateMapProviderLabel(provider) {
+    const providerLabel = document.getElementById('map-provider-label');
+    if (!providerLabel) return;
+    providerLabel.textContent = provider === 'google' ? 'Google Maps' : 'OpenStreetMap';
+}
+
+function destroyCurrentMap() {
+    if (activeMapProvider === 'osm' && currentMap && typeof currentMap.setTarget === 'function') {
         currentMap.setTarget(null);
-        currentMap = null;
     }
-    
-    // Create layer based on current map type
-    const layer = mapType === 'amap' ? createAmapLayer() : createOSMLayer();
-    
+    if (googleMarker) {
+        googleMarker.setMap(null);
+    }
+    googleCoverageCircles.forEach(circle => circle.setMap(null));
+    if (googleInfoWindow) {
+        googleInfoWindow.close();
+    }
+
+    currentMap = null;
+    activeMapProvider = null;
+    osmMarkerLayer = null;
+    osmPopupOverlay = null;
+    googleMarker = null;
+    googleInfoWindow = null;
+    googleCoverageCircles = [];
+}
+
+function clearCurrentMapMarker() {
+    currentMarkerDetails = null;
+    if (osmMarkerLayer) {
+        osmMarkerLayer.getSource().clear();
+    }
+    if (osmPopupOverlay) {
+        osmPopupOverlay.setPosition(undefined);
+    }
+    const popupElement = document.getElementById('map-marker-popup');
+    if (popupElement) popupElement.hidden = true;
+    if (googleMarker) {
+        googleMarker.setMap(null);
+        googleMarker = null;
+    }
+    googleCoverageCircles.forEach(circle => circle.setMap(null));
+    googleCoverageCircles = [];
+    if (googleInfoWindow) googleInfoWindow.close();
+    showMapEmptyState();
+}
+
+function initializeMap() {
+    return initializeConfiguredMap();
+}
+
+function initializeMapForMonitor() {
+    if (currentPage !== 'monitor' || !document.getElementById('map')) return;
+
+    initializeConfiguredMap();
+    restoreLastMapLocation(false);
+}
+
+function initializeConfiguredMap() {
+    if (mapRuntimeConfig.provider === 'google' && googleMapsReady && initializeGoogleMap()) {
+        return true;
+    }
+
+    const initialized = initializeOpenStreetMap();
+    if (initialized && mapRuntimeConfig.provider === 'google') {
+        const message = googleMapsFailed
+            ? 'Google 地圖載入失敗，已切換至 OpenStreetMap。'
+            : 'Google 地圖載入中，暫時顯示 OpenStreetMap。';
+        showMapStatusMessage(message);
+    }
+    return initialized;
+}
+
+function fallbackToOpenStreetMap(message) {
+    if (currentPage !== 'monitor' || !document.getElementById('map')) return;
+    if (initializeOpenStreetMap()) {
+        restoreLastMapLocation(false);
+        showMapStatusMessage(message);
+    }
+}
+
+function restoreLastMapLocation(isInitialMarking) {
+    if (lastPosition.latitude === null || lastPosition.longitude === null) return;
+    updateMapLocation(
+        lastPosition.latitude,
+        lastPosition.longitude,
+        currentMountName,
+        isInitialMarking
+    );
+}
+
+function initializeOpenStreetMap() {
+    if (typeof ol === 'undefined') {
+        showMapStatusMessage('本機地圖程式庫載入失敗；其他管理功能仍可正常使用。');
+        return false;
+    }
+
+    const mapContainer = document.getElementById('map');
+    if (!mapContainer) return false;
+
+    destroyCurrentMap();
     try {
-        currentMap = new ol.Map({
-            target: 'map',
-            layers: [layer],
-            view: new ol.View({
-                center: ol.proj.fromLonLat([110.277492, 25.20341154]),
-                zoom: 8
-            })
-        });
-        
-        // Create marker layer
-        const markerLayer = new ol.layer.Vector({
+        const layer = createOSMLayer();
+        osmMarkerLayer = new ol.layer.Vector({
             source: new ol.source.Vector()
         });
-        currentMap.addLayer(markerLayer);
-        
-        console.log('[地图初始化] 地图实例创建成功');
-        updateMapButtons();
+        currentMap = new ol.Map({
+            target: mapContainer,
+            layers: [layer, osmMarkerLayer],
+            view: new ol.View({
+                center: ol.proj.fromLonLat([
+                    mapRuntimeConfig.defaultLongitude,
+                    mapRuntimeConfig.defaultLatitude
+                ]),
+                zoom: mapRuntimeConfig.defaultZoom
+            })
+        });
+        activeMapProvider = 'osm';
+        updateMapProviderLabel('osm');
+        hideMapStatusMessage();
+
+        const popupElement = document.getElementById('map-marker-popup');
+        if (popupElement) {
+            osmPopupOverlay = new ol.Overlay({
+                element: popupElement,
+                positioning: 'bottom-center',
+                offset: [0, -18],
+                stopEvent: false
+            });
+            currentMap.addOverlay(osmPopupOverlay);
+            currentMap.on('singleclick', event => {
+                const stationFeature = currentMap.forEachFeatureAtPixel(
+                    event.pixel,
+                    feature => feature.get('isStationMarker') ? feature : null
+                );
+                if (stationFeature && currentMarkerDetails) {
+                    populateMarkerDetails(popupElement, currentMarkerDetails);
+                    popupElement.hidden = false;
+                    osmPopupOverlay.setPosition(stationFeature.getGeometry().getCoordinates());
+                } else {
+                    popupElement.hidden = true;
+                    osmPopupOverlay.setPosition(undefined);
+                }
+            });
+        }
+        return true;
     } catch (error) {
-        console.error('[地图初始化] 创建地图实例失败:', error);
+        currentMap = null;
+        activeMapProvider = null;
+        showMapStatusMessage('OpenStreetMap 無法初始化；其他管理功能仍可正常使用。');
+        return false;
     }
 }
 
-// Create Amap layer
-function createAmapLayer() {
-    return new ol.layer.Tile({
-        source: new ol.source.XYZ({
-            url: 'https://wprd01.is.autonavi.com/appmaptile?x={x}&y={y}&z={z}&lang=zh_cn&size=1&scl=1&style=7',
-            crossOrigin: 'anonymous'
-        })
-    });
+function initializeGoogleMap() {
+    const mapContainer = document.getElementById('map');
+    const googleApiAvailable = typeof google !== 'undefined' && google.maps && google.maps.Map;
+    if (!mapContainer || !mapRuntimeConfig.googleEnabled || !googleApiAvailable) return false;
+
+    destroyCurrentMap();
+    try {
+        currentMap = new google.maps.Map(mapContainer, {
+            center: {
+                lat: mapRuntimeConfig.defaultLatitude,
+                lng: mapRuntimeConfig.defaultLongitude
+            },
+            zoom: mapRuntimeConfig.defaultZoom,
+            mapTypeId: google.maps.MapTypeId.ROADMAP,
+            mapTypeControl: true,
+            mapTypeControlOptions: {
+                mapTypeIds: [
+                    google.maps.MapTypeId.ROADMAP,
+                    google.maps.MapTypeId.SATELLITE,
+                    google.maps.MapTypeId.HYBRID,
+                    google.maps.MapTypeId.TERRAIN
+                ]
+            },
+            streetViewControl: false,
+            scaleControl: true,
+            fullscreenControl: true
+        });
+        activeMapProvider = 'google';
+        googleInfoWindow = new google.maps.InfoWindow();
+        updateMapProviderLabel('google');
+        hideMapStatusMessage();
+        return true;
+    } catch (error) {
+        currentMap = null;
+        activeMapProvider = null;
+        return false;
+    }
 }
 
-// Create OSM layer
 function createOSMLayer() {
-    return new ol.layer.Tile({
-        source: new ol.source.OSM()
+    const tileSource = new ol.source.OSM({
+        attributions: '&copy; <a href="https://www.openstreetmap.org/copyright" target="_blank" rel="noopener noreferrer">OpenStreetMap contributors</a>'
+    });
+
+    tileSource.on('tileloaderror', () => {
+        showMapStatusMessage('無法取得 OpenStreetMap 圖磚；其他管理功能仍可正常使用。');
+    });
+
+    return new ol.layer.Tile({ source: tileSource });
+}
+
+function isCurrentMountOnline(mountName) {
+    if (!mountName || !window.onlineMounts) return false;
+    return Object.prototype.hasOwnProperty.call(window.onlineMounts, mountName);
+}
+
+function createMarkerDetails(latitude, longitude, mountName) {
+    const resolvedMountName = mountName || currentMountName || '未知';
+    return {
+        name: currentStationName || resolvedMountName || '未知基站',
+        mountName: resolvedMountName,
+        latitude: Number(latitude),
+        longitude: Number(longitude),
+        online: isCurrentMountOnline(resolvedMountName)
+    };
+}
+
+function populateMarkerDetails(container, details) {
+    container.replaceChildren();
+    const rows = [
+        ['基站名稱', details.name],
+        ['掛載點', details.mountName],
+        ['緯度', details.latitude.toFixed(6)],
+        ['經度', details.longitude.toFixed(6)],
+        ['狀態', details.online ? '線上' : '離線']
+    ];
+
+    rows.forEach(([label, value]) => {
+        const row = document.createElement('div');
+        row.className = 'map-marker-popup-row';
+        const labelElement = document.createElement('span');
+        labelElement.className = 'map-marker-popup-label';
+        labelElement.textContent = `${label}：`;
+        const valueElement = document.createElement('span');
+        valueElement.textContent = String(value);
+        row.append(labelElement, valueElement);
+        container.appendChild(row);
     });
 }
 
-// Switch to Amap
-function switchToAmap() {
-    if (mapType !== 'amap') {
-        mapType = 'amap';
-        mapSwitched = true; // Mark that map was switched
-        initMap();
-        // If we have position data, force re-marking
-        if (lastPosition.latitude !== null && lastPosition.longitude !== null) {
-            handlePositionUpdate(lastPosition.latitude, lastPosition.longitude);
-        }
+function updateOpenStreetMapMarker(details, isInitialMarking) {
+    if (!currentMap || !osmMarkerLayer) return;
+    const center = ol.proj.fromLonLat([details.longitude, details.latitude]);
+    const source = osmMarkerLayer.getSource();
+    source.clear();
+
+    const markerFeature = new ol.Feature({
+        geometry: new ol.geom.Point(center),
+        name: details.name,
+        isStationMarker: true
+    });
+    markerFeature.setStyle(new ol.style.Style({
+        image: new ol.style.Icon({
+            src: 'data:image/svg+xml;base64,' + btoa(`
+                <svg xmlns="http://www.w3.org/2000/svg" width="32" height="32" viewBox="0 0 32 32">
+                    <circle cx="16" cy="16" r="12" fill="#ffffff" stroke="#1565c0" stroke-width="3"/>
+                    <text x="16" y="21" text-anchor="middle" font-family="Arial, sans-serif" font-size="16" font-weight="bold" fill="#dc143c">T</text>
+                </svg>
+            `),
+            anchor: [0.5, 0.5]
+        })
+    }));
+    source.addFeature(markerFeature);
+
+    const textFeature = new ol.Feature({
+        geometry: new ol.geom.Point(center),
+        name: '基站名稱標籤'
+    });
+    textFeature.setStyle(new ol.style.Style({
+        text: new ol.style.Text({
+            text: details.name,
+            font: 'bold 16px Arial',
+            fill: new ol.style.Fill({ color: '#1565c0' }),
+            stroke: new ol.style.Stroke({ color: '#ffffff', width: 3 }),
+            offsetY: -25
+        })
+    }));
+    source.addFeature(textFeature);
+
+    [
+        [20000, 'rgba(21, 101, 192, 0.15)'],
+        [50000, 'rgba(66, 165, 245, 0.2)']
+    ].forEach(([radius, color]) => {
+        const coverageCircle = new ol.Feature({
+            geometry: new ol.geom.Circle(center, radius)
+        });
+        coverageCircle.setStyle(new ol.style.Style({
+            fill: new ol.style.Fill({ color })
+        }));
+        source.addFeature(coverageCircle);
+    });
+
+    currentMap.getView().setCenter(center);
+    if (isInitialMarking) currentMap.getView().setZoom(mapRuntimeConfig.defaultZoom);
+
+    const popupElement = document.getElementById('map-marker-popup');
+    if (popupElement && osmPopupOverlay) {
+        populateMarkerDetails(popupElement, details);
+        popupElement.hidden = false;
+        osmPopupOverlay.setPosition(center);
     }
 }
 
-// Switch to OSM
-function switchToOSM() {
-    if (mapType !== 'osm') {
-        mapType = 'osm';
-        mapSwitched = true; // Mark that map was switched
-        initMap();
-        // If we have position data, force re-marking
-        if (lastPosition.latitude !== null && lastPosition.longitude !== null) {
-            handlePositionUpdate(lastPosition.latitude, lastPosition.longitude);
-        }
-    }
+function openGoogleMarkerInfo() {
+    if (!googleInfoWindow || !googleMarker || !currentMarkerDetails || !currentMap) return;
+    const content = document.createElement('div');
+    content.className = 'map-marker-popup';
+    populateMarkerDetails(content, currentMarkerDetails);
+    googleInfoWindow.setContent(content);
+    googleInfoWindow.open({ map: currentMap, anchor: googleMarker });
 }
 
-// Update map button status
-function updateMapButtons() {
-    const amapBtn = document.getElementById('amap-btn');
-    const osmBtn = document.getElementById('osm-btn');
-    
-    if (mapType === 'amap') {
-        amapBtn.className = 'btn btn-primary btn-sm';
-        osmBtn.className = 'btn btn-secondary btn-sm';
+function updateGoogleMapMarker(details, isInitialMarking) {
+    if (!currentMap || typeof google === 'undefined' || !google.maps) return;
+    const position = { lat: details.latitude, lng: details.longitude };
+
+    if (!googleMarker) {
+        googleMarker = new google.maps.Marker({
+            map: currentMap,
+            position,
+            title: details.name
+        });
+        googleMarker.addListener('click', openGoogleMarkerInfo);
     } else {
-        amapBtn.className = 'btn btn-secondary btn-sm';
-        osmBtn.className = 'btn btn-primary btn-sm';
+        googleMarker.setMap(currentMap);
+        googleMarker.setPosition(position);
+        googleMarker.setTitle(details.name);
     }
-}
 
+    if (googleCoverageCircles.length === 0) {
+        googleCoverageCircles = [
+            new google.maps.Circle({
+                map: currentMap,
+                center: position,
+                radius: 20000,
+                fillColor: '#1565c0',
+                fillOpacity: 0.15,
+                strokeOpacity: 0
+            }),
+            new google.maps.Circle({
+                map: currentMap,
+                center: position,
+                radius: 50000,
+                fillColor: '#42a5f5',
+                fillOpacity: 0.2,
+                strokeOpacity: 0
+            })
+        ];
+    } else {
+        googleCoverageCircles.forEach(circle => circle.setCenter(position));
+    }
 
-// 坐标转换函数：WGS84转GCJ02（火星坐标系）
-function wgs84ToGcj02(lng, lat) {
-    const x_pi = 3.14159265358979324 * 3000.0 / 180.0;
-    const pi = 3.1415926535897932384626;
-    const a = 6378245.0; // 长半轴
-    const ee = 0.00669342162296594323; // 扁率
-    
-    // 判断是否在中国境外
-    function outOfChina(lng, lat) {
-        return (lng < 72.004 || lng > 137.8347) || (lat < 0.8293 || lat > 55.8271);
-    }
-    
-    function transformLat(lng, lat) {
-        let ret = -100.0 + 2.0 * lng + 3.0 * lat + 0.2 * lat * lat + 0.1 * lng * lat + 0.2 * Math.sqrt(Math.abs(lng));
-        ret += (20.0 * Math.sin(6.0 * lng * pi) + 20.0 * Math.sin(2.0 * lng * pi)) * 2.0 / 3.0;
-        ret += (20.0 * Math.sin(lat * pi) + 40.0 * Math.sin(lat / 3.0 * pi)) * 2.0 / 3.0;
-        ret += (160.0 * Math.sin(lat / 12.0 * pi) + 320 * Math.sin(lat * pi / 30.0)) * 2.0 / 3.0;
-        return ret;
-    }
-    
-    function transformLng(lng, lat) {
-        let ret = 300.0 + lng + 2.0 * lat + 0.1 * lng * lng + 0.1 * lng * lat + 0.1 * Math.sqrt(Math.abs(lng));
-        ret += (20.0 * Math.sin(6.0 * lng * pi) + 20.0 * Math.sin(2.0 * lng * pi)) * 2.0 / 3.0;
-        ret += (20.0 * Math.sin(lng * pi) + 40.0 * Math.sin(lng / 3.0 * pi)) * 2.0 / 3.0;
-        ret += (150.0 * Math.sin(lng / 12.0 * pi) + 300.0 * Math.sin(lng / 30.0 * pi)) * 2.0 / 3.0;
-        return ret;
-    }
-    
-    // 如果在中国境外，不进行转换
-    if (outOfChina(lng, lat)) {
-        return [lng, lat];
-    }
-    
-    let dlat = transformLat(lng - 105.0, lat - 35.0);
-    let dlng = transformLng(lng - 105.0, lat - 35.0);
-    const radlat = lat / 180.0 * pi;
-    let magic = Math.sin(radlat);
-    magic = 1 - ee * magic * magic;
-    const sqrtmagic = Math.sqrt(magic);
-    dlat = (dlat * 180.0) / ((a * (1 - ee)) / (magic * sqrtmagic) * pi);
-    dlng = (dlng * 180.0) / (a / sqrtmagic * Math.cos(radlat) * pi);
-    const mglat = lat + dlat;
-    const mglng = lng + dlng;
-    return [mglng, mglat];
+    currentMap.setCenter(position);
+    if (isInitialMarking) currentMap.setZoom(mapRuntimeConfig.defaultZoom);
+    openGoogleMarkerInfo();
 }
 
 function updateMapLocation(latitude, longitude, mountName = null, isInitialMarking = false) {
+    const numericLatitude = Number(latitude);
+    const numericLongitude = Number(longitude);
+    if (!Number.isFinite(numericLatitude) || !Number.isFinite(numericLongitude)) return;
+
+    if (!currentMap) initializeMap();
     if (!currentMap) return;
-    
-    // 根据地图类型决定是否进行坐标转换
-    let displayLng = longitude;
-    let displayLat = latitude;
-    
-    // 如果是高德地图，需要将WGS84坐标转换为GCJ02坐标
-    if (mapType === 'amap') {
-        const converted = wgs84ToGcj02(longitude, latitude);
-        displayLng = converted[0];
-        displayLat = converted[1];
-        console.log(`[坐标转换] WGS84: ${longitude}, ${latitude} -> GCJ02: ${displayLng}, ${displayLat}`);
+
+    if (mountName) currentMountName = mountName;
+    currentMarkerDetails = createMarkerDetails(
+        numericLatitude,
+        numericLongitude,
+        currentMountName
+    );
+    hideMapEmptyState();
+
+    if (activeMapProvider === 'google') {
+        updateGoogleMapMarker(currentMarkerDetails, isInitialMarking);
+    } else if (activeMapProvider === 'osm') {
+        updateOpenStreetMapMarker(currentMarkerDetails, isInitialMarking);
     }
-    
-    const center = ol.proj.fromLonLat([displayLng, displayLat]);
-    currentMap.getView().setCenter(center);
-    
-    
-    if (isInitialMarking) {
-        currentMap.getView().setZoom(8);
-    }
-    
-    
-    const layers = currentMap.getLayers().getArray();
-    const markerLayer = layers.find(layer => layer instanceof ol.layer.Vector);
-    
-    if (markerLayer) {
-        const source = markerLayer.getSource();
-        
-        
-        source.clear();
-        
-        
-        const markerFeature = new ol.Feature({
-            geometry: new ol.geom.Point(center),
-            name: 'Base Station Location'
-        });
-        
-        markerFeature.setStyle(new ol.style.Style({
-            image: new ol.style.Icon({
-                src: 'data:image/svg+xml;base64,' + btoa(`
-                    <svg xmlns="http://www.w3.org/2000/svg" width="32" height="32" viewBox="0 0 32 32">
-                        <defs>
-                            <filter id="shadow" x="-50%" y="-50%" width="200%" height="200%">
-                                <feDropShadow dx="2" dy="2" stdDeviation="2" flood-color="rgba(0,0,0,0.3)"/>
-                            </filter>
-                        </defs>
-                        <circle cx="16" cy="16" r="12" fill="transparent" stroke="rgba(21, 101, 192, 0.8)" stroke-width="3" filter="url(#shadow)"/>
-                        <text x="16" y="21" text-anchor="middle" dominant-baseline="central" font-family="Arial, sans-serif" font-size="16" font-weight="bold" fill="#DC143C">T</text>
-                    </svg>
-                `),
-                scale: 1,
-                anchor: [0.5, 0.5]
-            })
-        }));
-        
-        source.addFeature(markerFeature);
-        
-        
-        if (mountName) {
-            const textFeature = new ol.Feature({
-                geometry: new ol.geom.Point(center),
-                name: 'Mount Name Label'
-            });
-            
-            textFeature.setStyle(new ol.style.Style({
-                text: new ol.style.Text({
-                    text: mountName,
-                    font: 'bold 18px Arial',
-                    fill: new ol.style.Fill({
-                        color: '#1565C0'
-                    }),
-                    stroke: new ol.style.Stroke({
-                        color: '#FFFFFF',
-                        width: 3
-                    }),
-                    offsetY: -25,
-                    textAlign: 'center',
-                    textBaseline: 'bottom'
-                })
-            }));
-            
-            source.addFeature(textFeature);
+}
+
+function refreshCurrentMapMarkerDetails() {
+    if (!currentMarkerDetails) return;
+    currentMarkerDetails = createMarkerDetails(
+        currentMarkerDetails.latitude,
+        currentMarkerDetails.longitude,
+        currentMarkerDetails.mountName
+    );
+
+    if (activeMapProvider === 'google' && googleMarker) {
+        googleMarker.setTitle(currentMarkerDetails.name);
+        openGoogleMarkerInfo();
+    } else if (activeMapProvider === 'osm') {
+        const popupElement = document.getElementById('map-marker-popup');
+        if (popupElement && !popupElement.hidden) {
+            populateMarkerDetails(popupElement, currentMarkerDetails);
         }
-        
-        
-        const circle20km = new ol.Feature({
-            geometry: new ol.geom.Circle(center, 20000)
-        });
-        
-        circle20km.setStyle(new ol.style.Style({
-            fill: new ol.style.Fill({
-                color: 'rgba(21, 101, 192, 0.15)'
-            })
-        }));
-        
-        source.addFeature(circle20km);
-        
-        
-        const circle50km = new ol.Feature({
-            geometry: new ol.geom.Circle(center, 50000)
-        });
-        
-        circle50km.setStyle(new ol.style.Style({
-            fill: new ol.style.Fill({
-                color: 'rgba(66, 165, 245, 0.2)'
-            })
-        }));
-        
-        source.addFeature(circle50km);
     }
 }
 
@@ -900,11 +1034,11 @@ function getFrequencyInfo(constellation, channel) {
     
     const mappedConstellation = constellationMap[constellation];
     if (!mappedConstellation || !frequencyMap[mappedConstellation] || !channel) {
-        return { band: 'Unknown', freq: 'Unknown' };
+        return { band: '未知', freq: '未知' };
     }
     
     const freqInfo = frequencyMap[mappedConstellation][channel];
-    return freqInfo || { band: 'Unknown', freq: 'Unknown' };
+    return freqInfo || { band: '未知', freq: '未知' };
 }
 
 
@@ -1114,12 +1248,12 @@ function showSatelliteTooltip(event, satellite, constellation) {
     tooltip.className = 'satellite-tooltip';
     tooltip.innerHTML = `
         <div><strong>${satellite.name}</strong></div>
-        <div>Signal Strength: ${satellite.signalStrength} dBHz</div>
-                    <div>Elevation: ${satellite.elevation}°</div>
-                    <div>Azimuth: ${satellite.azimuth}°</div>
-                    <div>Band: ${freqInfo.band}</div>
-                    <div>Frequency: ${freqInfo.freq}</div>
-                    <div>Channel: ${satellite.channel || 'Unknown'}</div>
+        <div>訊號強度：${satellite.signalStrength} dBHz</div>
+                    <div>仰角：${satellite.elevation}°</div>
+                    <div>方位角：${satellite.azimuth}°</div>
+                    <div>頻段：${freqInfo.band}</div>
+                    <div>頻率：${freqInfo.freq}</div>
+                    <div>通道：${satellite.channel || '未知'}</div>
     `;
     
     tooltip.style.cssText = `
@@ -1188,8 +1322,8 @@ function hideSatelliteTooltip() {
 function getDashboardContent() {
     return `
         <div class="page-header">
-            <h3>System Status</h3>
-            <div class="dashboard-timestamp" id="dashboard-timestamp">Loading...</div>
+            <h3>系統狀態</h3>
+            <div class="dashboard-timestamp" id="dashboard-timestamp">載入中...</div>
         </div>
         
         <!-- 系统概览卡片 -->
@@ -1197,7 +1331,7 @@ function getDashboardContent() {
             <div class="dashboard-card">
                 <div class="card-icon">⏰</div>
                 <div class="card-content">
-                    <div class="card-title">Uptime</div>
+                    <div class="card-title">執行時間</div>
                     <div class="card-value" id="system-uptime">-</div>
                 </div>
             </div>
@@ -1205,7 +1339,7 @@ function getDashboardContent() {
             <div class="dashboard-card">
                 <div class="card-icon">⚡</div>
                 <div class="card-content">
-                    <div class="card-title">CPU Usage</div>
+                    <div class="card-title">CPU 使用率</div>
                     <div class="card-value" id="system-cpu">-</div>
                 </div>
             </div>
@@ -1213,7 +1347,7 @@ function getDashboardContent() {
             <div class="dashboard-card">
                 <div class="card-icon">📈</div>
                 <div class="card-content">
-                    <div class="card-title">Memory Usage</div>
+                    <div class="card-title">記憶體使用率</div>
                     <div class="card-value" id="system-memory">-</div>
                     <div class="card-detail" id="system-memory-detail">-</div>
                 </div>
@@ -1222,7 +1356,7 @@ function getDashboardContent() {
             <div class="dashboard-card">
                 <div class="card-icon">📻</div>
                 <div class="card-content">
-                    <div class="card-title">Network Bandwidth</div>
+                    <div class="card-title">網路頻寬</div>
                     <div class="card-value" id="system-bandwidth">-</div>
                 </div>
             </div>
@@ -1230,34 +1364,34 @@ function getDashboardContent() {
         
         <!-- 连接统计 -->
         <div class="dashboard-section">
-            <h4>Connection Statistics</h4>
+            <h4>連線統計</h4>
             <div class="stats-grid">
                 <div class="stat-item">
-                    <span class="stat-label">Active Connections:</span>
+                    <span class="stat-label">目前連線數：</span>
                     <span class="stat-value" id="active-connections">-</span>
                 </div>
                 <div class="stat-item">
-                    <span class="stat-label">Max Connections:</span>
+                    <span class="stat-label">連線數上限：</span>
                     <span class="stat-value" id="max-connections">-</span>
                 </div>
                 <div class="stat-item">
-                    <span class="stat-label">Total Connections:</span>
+                    <span class="stat-label">累計連線數：</span>
                     <span class="stat-value" id="total-connections">-</span>
                 </div>
                 <div class="stat-item">
-                    <span class="stat-label">Rejected Connections:</span>
+                    <span class="stat-label">拒絕連線數：</span>
                     <span class="stat-value" id="rejected-connections">-</span>
                 </div>
                 <div class="stat-item">
-                    <span class="stat-label">Online Mount Points:</span>
+                    <span class="stat-label">線上掛載點：</span>
                     <span class="stat-value" id="total-mounts">-</span>
                 </div>
                 <div class="stat-item">
-                    <span class="stat-label">User Connections:</span>
+                    <span class="stat-label">使用者連線數：</span>
                     <span class="stat-value" id="total-users">-</span>
                 </div>
                 <div class="stat-item">
-                    <span class="stat-label">Data Transfer:</span>
+                    <span class="stat-label">資料傳輸量：</span>
                     <span class="stat-value" id="total-data">-</span>
                 </div>
             </div>
@@ -1265,9 +1399,9 @@ function getDashboardContent() {
         
         <!-- 挂载点详情 -->
         <div class="dashboard-section">
-            <h4>Mount Point Details</h4>
+            <h4>掛載點詳細資料</h4>
             <div class="mounts-container" id="mounts-detail">
-                <div class="loading-text">Loading...</div>
+                <div class="loading-text">載入中...</div>
             </div>
         </div>
         
@@ -1442,8 +1576,8 @@ function getUsersContent(users) {
         //两种方式 API获取和socket推送 可以备用
         const isOnline = user.online !== undefined ? user.online : (window.onlineUsers && (user.username in window.onlineUsers));
         const statusHtml = isOnline ? 
-            '<span style="color: #28a745; font-weight: bold;">● Online</span>' : 
-            '<span style="color: #6c757d;">○ Offline</span>';
+            '<span style="color: #28a745; font-weight: bold;">● 線上</span>' :
+            '<span style="color: #6c757d;">○ 離線</span>';
         return `
             <tr class="user-row" data-username="${user.username}">
                 <td>${user.username}</td>
@@ -1451,8 +1585,8 @@ function getUsersContent(users) {
                 <td>${user.connection_count || 0}</td>
                 <td>${user.connect_time || '-'}</td>
                 <td>
-                    <button class="btn btn-primary btn-sm edit-user-btn" data-username="${user.username}">Edit</button>
-                    <button class="btn btn-danger btn-sm delete-user-btn" data-username="${user.username}">Delete</button>
+                    <button class="btn btn-primary btn-sm edit-user-btn" data-username="${user.username}">編輯</button>
+                    <button class="btn btn-danger btn-sm delete-user-btn" data-username="${user.username}">刪除</button>
                 </td>
             </tr>
         `;
@@ -1480,18 +1614,18 @@ function getUsersContent(users) {
     
     return `
         <div class="page-header">
-            <h3>User Management</h3>
-            <button onclick="showAddUserForm()" class="btn btn-primary">Add User</button>
+            <h3>使用者管理</h3>
+            <button onclick="showAddUserForm()" class="btn btn-primary">新增使用者</button>
         </div>
         <div class="table-container">
             <table class="data-table">
                 <thead>
                     <tr>
-                        <th>Username</th>
-                        <th>Status</th>
-                        <th>Connections</th>
-                        <th>Connect Time</th>
-                        <th>Actions</th>
+                        <th>使用者名稱</th>
+                        <th>狀態</th>
+                        <th>連線數</th>
+                        <th>連線時間</th>
+                        <th>操作</th>
                     </tr>
                 </thead>
                 <tbody>
@@ -1508,18 +1642,18 @@ function getMountsContent(mounts) {
         // 优先使用从API获取的在线状态，如果没有则使用WebSocket数据
         const isOnline = mount.active !== undefined ? mount.active : (window.onlineMounts && (mount.mount in window.onlineMounts));
         const statusHtml = isOnline ? 
-            '<span style="color: #28a745; font-weight: bold;">● Online</span>' : 
-            '<span style="color: #6c757d;">○ Offline</span>';
+            '<span style="color: #28a745; font-weight: bold;">● 線上</span>' :
+            '<span style="color: #6c757d;">○ 離線</span>';
         return `
             <tr class="mount-row" data-mount="${mount.mount}">
                 <td>${mount.mount}</td>
                 <td class="mount-status">${statusHtml}</td>
                 <td>${mount.connections || 0}</td>
-                <td>${mount.username || 'Unspecified'}</td>
+                <td>${mount.username || '未指定'}</td>
                 <td>${mount.description || '-'}</td>
                 <td>
-                    <button onclick="editMount('${mount.mount}')" class="btn btn-primary btn-sm">Edit</button>
-                    <button onclick="deleteMount('${mount.mount}')" class="btn btn-danger btn-sm">Delete</button>
+                    <button onclick="editMount('${mount.mount}')" class="btn btn-primary btn-sm">編輯</button>
+                    <button onclick="deleteMount('${mount.mount}')" class="btn btn-danger btn-sm">刪除</button>
                 </td>
             </tr>
         `;
@@ -1527,19 +1661,19 @@ function getMountsContent(mounts) {
     
     return `
         <div class="page-header">
-            <h3>Mount Point Management</h3>
-            <button onclick="showAddMountForm()" class="btn btn-primary">Add Mount Point</button>
+            <h3>掛載點管理</h3>
+            <button onclick="showAddMountForm()" class="btn btn-primary">新增掛載點</button>
         </div>
         <div class="table-container">
             <table class="data-table">
                 <thead>
                     <tr>
-                        <th>Mount Point</th>
-                        <th>Status</th>
-                        <th>Connections</th>
-                        <th>Owner</th>
-                        <th>Description</th>
-                        <th>Actions</th>
+                        <th>掛載點</th>
+                        <th>狀態</th>
+                        <th>連線數</th>
+                        <th>所屬使用者</th>
+                        <th>說明</th>
+                        <th>操作</th>
                     </tr>
                 </thead>
                 <tbody>
@@ -1554,8 +1688,8 @@ function getMountsContent(mounts) {
 function getMonitorContent() {
     return `
         <div class="page-header">
-            <h3><i class="fas fa-satellite-dish"></i> Base Station STR Information</h3>
-            <p class="page-subtitle">Real-time monitoring of NTRIP data streams and base station status</p>
+            <h3><i class="fas fa-satellite-dish"></i> 基站 STR 資訊</h3>
+            <p class="page-subtitle">即時監控 NTRIP 資料串流與基站狀態</p>
         </div>
         
         <div class="monitor-dashboard">
@@ -1564,27 +1698,27 @@ function getMonitorContent() {
                 <!-- STR数据表 - 全宽 -->
                 <div class="monitor-card full-width">
                     <div class="card-header">
-                        <h4><i class="fas fa-table"></i> STR Data Table</h4>
+                        <h4><i class="fas fa-table"></i> STR 資料表</h4>
                     </div>
                     <div class="card-content" id="str-data">
-                        <p class="loading-text"><i class="fas fa-spinner fa-spin"></i> Loading STR table data...</p>
+                        <p class="loading-text"><i class="fas fa-spinner fa-spin"></i> 正在載入 STR 資料表...</p>
                     </div>
                 </div>
 
                 <!-- 基准站信息 - 全宽 -->
                 <div class="monitor-card full-width">
                     <div class="card-header">
-                        <h4><i class="fas fa-broadcast-tower"></i> Base Station Information</h4>
+                        <h4><i class="fas fa-broadcast-tower"></i> 基站資訊</h4>
                         <div class="card-status" id="station-status">
                             <span class="status-dot waiting"></span>
-                            <span>Waiting for selection</span>
+                            <span>等待選擇</span>
                         </div>
                     </div>
                     <div class="card-content">
                         <div id="station-info" class="station-info-container">
                             <div class="empty-state">
                                 <i class="fas fa-mouse-pointer"></i>
-                                <p>Please click the INFO button in the STR table to select a mount point</p>
+                                <p>請按一下 STR 資料表中的「資訊」按鈕以選擇掛載點</p>
                             </div>
                         </div>
                     </div>
@@ -1593,19 +1727,19 @@ function getMonitorContent() {
                 <!-- 基准站位置 - 全宽 -->
                 <div class="monitor-card full-width">
                     <div class="card-header">
-                        <h4><i class="fas fa-map-marker-alt"></i> Base Station Location</h4>
+                        <h4><i class="fas fa-map-marker-alt"></i> 基站位置</h4>
+                        <span id="map-provider-label" class="map-provider-label">載入中</span>
                     </div>
                     <div class="card-content map-content">
                         <div id="map-container" class="map-container">
                             <div id="map" class="map-display"></div>
-                            <div class="map-overlay" id="map-loading">
-                                <i class="fas fa-map"></i>
-                                <p>Waiting for location data...</p>
+                            <div id="map-empty-state" class="map-empty-state" role="status">
+                                尚未收到基站位置，先顯示台灣預設中心。
                             </div>
-                            <div id="map-switch" class="map-switch-floating">
-                                <button id="amap-btn" class="btn btn-sm btn-primary">高德地图</button>
-                                <button id="osm-btn" class="btn btn-sm btn-secondary">OpenStreetMap</button>
+                            <div id="map-tile-error" class="map-tile-error" role="status" aria-live="polite" hidden>
+                                地圖服務暫時無法使用；其他管理功能仍可正常使用。
                             </div>
+                            <div id="map-marker-popup" class="map-marker-popup" hidden></div>
                         </div>
                     </div>
                 </div>
@@ -1613,17 +1747,17 @@ function getMonitorContent() {
                 <!-- 卫星数据可视化 - 全宽 -->
                 <div class="monitor-card full-width">
                     <div class="card-header">
-                        <h4><i class="fas fa-satellite"></i> Satellite Data Visualization</h4>
+                        <h4><i class="fas fa-satellite"></i> 衛星資料視覺化</h4>
                         <div class="card-status" id="satellite-status">
                             <span class="status-dot waiting"></span>
-                            <span>Waiting for data</span>
+                            <span>等待資料</span>
                         </div>
                     </div>
                     <div class="card-content">
                         <div id="satellite-container" class="satellite-container">
                             <div class="empty-state">
                                 <i class="fas fa-satellite-dish"></i>
-                                <p>Waiting for satellite data...</p>
+                                <p>等待衛星資料...</p>
                             </div>
                         </div>
                     </div>
@@ -1637,25 +1771,25 @@ function getMonitorContent() {
 function getSettingsContent() {
     return `
         <div class="page-header">
-            <h3>System Settings</h3>
+            <h3>系統設定</h3>
         </div>
         <div class="settings-container">
             <div class="settings-section">
-                <h4>Security Settings</h4>
+                <h4>安全性設定</h4>
                 <div class="form-group">
-                    <label for="admin-password">New Password:</label>
-                    <input type="password" id="admin-password" placeholder="Enter new password" class="form-control">
+                    <label for="admin-password">新密碼：</label>
+                    <input type="password" id="admin-password" placeholder="輸入新密碼" class="form-control">
                 </div>
                 <div class="form-group">
-                    <label for="confirm-password">Confirm Password:</label>
-                    <input type="password" id="confirm-password" placeholder="Enter password again" class="form-control">
+                    <label for="confirm-password">確認密碼：</label>
+                    <input type="password" id="confirm-password" placeholder="再次輸入密碼" class="form-control">
                 </div>
-                <button onclick="changePassword()" class="btn btn-primary">Change Admin Password</button>
+                <button onclick="changePassword()" class="btn btn-primary">變更管理員密碼</button>
             </div>
 
             <div class="settings-section">
-                <h4>System Control</h4>
-                <button onclick="restartProgram()" class="btn btn-warning" style="background-color: #f39c12; border-color: #f39c12;">Restart Program</button>
+                <h4>系統控制</h4>
+                <button onclick="restartProgram()" class="btn btn-warning" style="background-color: #f39c12; border-color: #f39c12;">重新啟動程式</button>
             </div>
         </div>
     `;
@@ -1677,6 +1811,7 @@ socket.on('online_users_update', function(data) {
 socket.on('online_mounts_update', function(data) {
     window.onlineMounts = data.mounts;
     updateOnlineStatus();
+    refreshCurrentMapMarkerDetails();
 });
 
 // STR
@@ -1734,13 +1869,14 @@ socket.on('rtcm_realtime_data', function(data) {
                 // 处理基准站位置信息
                 if (data.latitude && data.longitude) {
                     // console.log(`收到位置信息: ${data.latitude}, ${data.longitude}`);
-                    
+                    currentMountName = data.mount_name || data.mount || currentMountName;
+                    currentStationName = data.station_name || data.site_name || currentStationName || currentMountName;
                     
                     if (!currentMap && currentPage === 'monitor') {
                         initializeMap();
                     }
                     
-                    handlePositionUpdate(data.latitude, data.longitude);
+                    handlePositionUpdate(data.latitude, data.longitude, currentMountName);
                     
                     
                     updateElement('station-latitude', data.latitude.toFixed(6));
@@ -1767,10 +1903,10 @@ socket.on('rtcm_realtime_data', function(data) {
                         
                         
                         const rtcmSatellites = data.sats.map(sat => ({
-                            name: sat.id || sat.prn || 'Unknown',
+                            name: sat.id || sat.prn || '未知',
                             signalStrength: sat.snr || sat.signal_strength || 0,
                             frequency: sat.frequency || 0,
-                            channel: sat.signal_type || 'Unknown'
+                            channel: sat.signal_type || '未知'
                         }));
                         
                         
@@ -1818,21 +1954,27 @@ socket.on('rtcm_realtime_data', function(data) {
                     // 如果还是空状态，先创建基础结构
                     // console.log('[地理信息调试] 检测到empty-state，创建基础结构');
                     const stationData = {
-                        name: data.mount_name || data.mount || 'Unknown',
-                        id: data.station_id || 'Unknown',
-                        country: data.country || 'Unknown',
-                        city: data.city || 'Unknown',
+                        name: data.mount_name || data.mount || '未知',
+                        mount_name: data.mount_name || data.mount || currentMountName,
+                        station_name: data.station_name || data.site_name || data.station_id || '未知基站',
+                        id: data.station_id || '未知',
+                        country: data.country || '未知',
+                        city: data.city || '未知',
                         latitude: data.lat || 0,
                         longitude: data.lon || 0,
-                        height: data.height || 'Unknown',
+                        height: data.height || '未知',
                         x: data.x || 0,
                         y: data.y || 0,
                         z: data.z || 0,
-                        receiver: { name: 'Unknown', firmware: 'Unknown' },
-                        antenna: { name: 'Unknown', serial: 'Unknown' }
+                        receiver: { name: '未知', firmware: '未知' },
+                        antenna: { name: '未知', serial: '未知' }
                     };
                     // console.log('[地理信息调试] 准备显示基准站信息:', stationData);
                     displayStationInfo(stationData);
+                    if (data.lat !== undefined && data.lon !== undefined) {
+                        if (!currentMap) initializeMap();
+                        handlePositionUpdate(data.lat, data.lon, currentMountName);
+                    }
                 } else {
                     // 如果结构已存在，直接更新数据
                     // console.log('[地理信息调试] 基础结构已存在，更新数据');
@@ -1841,13 +1983,15 @@ socket.on('rtcm_realtime_data', function(data) {
                     
                     if (data.mount_name || data.mount) {
                         // console.log('[地理信息调试] 更新挂载点名称:', data.mount_name || data.mount);
-                        updateElement('station-name', data.mount_name || data.mount);
+                        currentMountName = data.mount_name || data.mount;
+                        updateElement('station-name', currentMountName);
                     }
                     
                     
                     if (data.station_id !== undefined) {
                         // console.log('[地理信息调试] 更新基准站ID:', data.station_id);
                         updateElement('station-id', data.station_id.toString());
+                        currentStationName = data.station_name || data.site_name || data.station_id.toString();
                     }
                     
                     
@@ -1855,7 +1999,8 @@ socket.on('rtcm_realtime_data', function(data) {
                         // console.log('[地理信息调试] 更新经纬度:', data.lat, data.lon);
                         
                         // 存储当前挂载点名称
-                        currentMountName = data.mount_name || data.mount || null;
+                        currentMountName = data.mount_name || data.mount || currentMountName;
+                        currentStationName = data.station_name || data.site_name || currentStationName || currentMountName;
                         
                         
                         if (!currentMap && currentPage === 'monitor') {
@@ -1882,7 +2027,7 @@ socket.on('rtcm_realtime_data', function(data) {
                     // country
                     if (data.country || data.country_name) {
                         // console.log('[地理信息调试] 更新国家:', data.country_name || data.country);
-                        updateElement('station-country', data.country_name || 'Unknown');
+                        updateElement('station-country', data.country_name || '未知');
                     }
                     
                     // city
@@ -1951,8 +2096,8 @@ function updateElement(id, value) {
 function updateSystemStats(stats) {
     if (!stats) return;
     
-    const timestamp = new Date().toLocaleString('zh-CN');
-    updateElement('dashboard-timestamp', `Last Updated: ${timestamp}`);
+    const timestamp = new Date().toLocaleString('zh-TW');
+    updateElement('dashboard-timestamp', `最後更新：${timestamp}`);
     
     if (stats.uptime !== undefined) {
         updateElement('system-uptime', formatUptime(stats.uptime));
@@ -2043,16 +2188,22 @@ function updateMountDetails(mounts) {
     if (!container) return;
     
     if (!mounts || mounts.length === 0) {
-        container.innerHTML = '<div class="loading-text">No mount point data available</div>';
+        container.innerHTML = '<div class="loading-text">目前沒有掛載點資料</div>';
         return;
     }
     
     const mountsHtml = mounts.map(mount => {
-        const mountName = mount.mount_name || 'Unknown';
+        const mountName = mount.mount_name || '未知';
         const userCount = mount.user_count || 0;
         const dataCount = mount.data_count || 0;
         const uptime = mount.uptime || 0;
         const status = mount.status || 'unknown';
+        const statusText = {
+            online: '線上',
+            offline: '離線',
+            validated: '已驗證',
+            unknown: '未知'
+        }[status] || status;
         
         // time
         const uptimeStr = formatUptime(uptime);
@@ -2061,10 +2212,10 @@ function updateMountDetails(mounts) {
             <div class="mount-item">
                 <div class="mount-name">${mountName}</div>
                 <div class="mount-stats">
-                    <div>👤 ${userCount} Users</div>
-            <div>📈 ${dataCount} Data Packets</div>
+                    <div>👤 ${userCount} 位使用者</div>
+            <div>📈 ${dataCount} 個資料封包</div>
                     <div>⏱️ ${uptimeStr}</div>
-                    <div>⚙️ ${status}</div>
+                    <div>⚙️ ${statusText}</div>
                 </div>
             </div>
         `;
@@ -2075,7 +2226,7 @@ function updateMountDetails(mounts) {
 
 
 function formatUptime(seconds) {
-    if (!seconds || seconds < 0) return '0s';
+    if (!seconds || seconds < 0) return '0 秒';
     
     const days = Math.floor(seconds / 86400);
     const hours = Math.floor((seconds % 86400) / 3600);
@@ -2083,13 +2234,13 @@ function formatUptime(seconds) {
     const secs = Math.floor(seconds % 60);
     
     if (days > 0) {
-        return `${days}d ${hours}h ${minutes}m`;
+        return `${days} 天 ${hours} 小時 ${minutes} 分鐘`;
     } else if (hours > 0) {
-        return `${hours}h ${minutes}m`;
+        return `${hours} 小時 ${minutes} 分鐘`;
     } else if (minutes > 0) {
-        return `${minutes}m ${secs}s`;
+        return `${minutes} 分鐘 ${secs} 秒`;
     } else {
-        return `${secs}s`;
+        return `${secs} 秒`;
     }
 }
 
@@ -2105,8 +2256,8 @@ function updateOnlineStatus() {
                 if (window.onlineUsers) {
                     const isOnline = username in window.onlineUsers;
                     statusElement.innerHTML = isOnline ? 
-                        '<span style="color: #28a745; font-weight: bold;">● Online</span>' : 
-                        '<span style="color: #6c757d;">○ Offline</span>';
+                        '<span style="color: #28a745; font-weight: bold;">● 線上</span>' :
+                        '<span style="color: #6c757d;">○ 離線</span>';
                 }
             }
         });
@@ -2123,8 +2274,8 @@ function updateOnlineStatus() {
                 if (window.onlineMounts) {
                     const isOnline = mountName in window.onlineMounts;
                     statusElement.innerHTML = isOnline ? 
-                        '<span style="color: #28a745; font-weight: bold;">● Online</span>' : 
-                        '<span style="color: #6c757d;">○ Offline</span>';
+                        '<span style="color: #28a745; font-weight: bold;">● 線上</span>' :
+                        '<span style="color: #6c757d;">○ 離線</span>';
                 }
             }
         });
@@ -2161,15 +2312,15 @@ function updateMonitorData() {
         const strDataElement = document.getElementById('str-data');
         if (strDataElement) {
             if (Object.keys(window.strData).length === 0) {
-                strDataElement.innerHTML = '<div class="empty-state"><i class="fas fa-table"></i><p>No STR table data available</p></div>';
+                strDataElement.innerHTML = '<div class="empty-state"><i class="fas fa-table"></i><p>目前沒有 STR 資料表資料</p></div>';
             } else {
                 let strHtml = '';
                 Object.entries(window.strData).forEach(([mountName, strContent]) => {
                     strHtml += `
                         <div class="str-row">
-                            <button class="str-info-btn" data-mount="${mountName}">INFO</button>
+                            <button class="str-info-btn" data-mount="${mountName}">資訊</button>
                             <div class="str-content-wrapper">
-                                <div class="str-content-inline">${strContent || 'No data available'}</div>
+                                <div class="str-content-inline">${strContent || '目前沒有資料'}</div>
                             </div>
                         </div>
                     `;
@@ -2187,7 +2338,7 @@ function updateMonitorData() {
 function refreshSTRData() {
     const strContainer = document.getElementById('str-data');
     if (strContainer) {
-        strContainer.innerHTML = '<p class="loading-text"><i class="fas fa-spinner fa-spin"></i> Refreshing STR table data...</p>';
+        strContainer.innerHTML = '<p class="loading-text"><i class="fas fa-spinner fa-spin"></i> 正在重新整理 STR 資料表...</p>';
     }
     
     
@@ -2201,7 +2352,7 @@ function updateMonitorStatus(systemStatus) {
     
     const connectionStatus = document.getElementById('connection-status-monitor');
     if (connectionStatus) {
-        connectionStatus.textContent = socket && socket.connected ? 'Connected' : 'Disconnected';
+        connectionStatus.textContent = socket && socket.connected ? '已連線' : '已中斷連線';
     }
     
     
@@ -2226,10 +2377,10 @@ function updateStationStatus(hasData) {
         
         if (hasData) {
             statusDot.className = 'status-dot online';
-            statusText.textContent = 'Selected';
+            statusText.textContent = '已選擇';
         } else {
             statusDot.className = 'status-dot waiting';
-            statusText.textContent = 'Waiting for selection';
+            statusText.textContent = '等待選擇';
         }
     }
 }
@@ -2243,10 +2394,10 @@ function updateSatelliteStatus(hasData) {
         
         if (hasData) {
             statusDot.className = 'status-dot online';
-            statusText.textContent = 'Receiving';
+            statusText.textContent = '接收中';
         } else {
             statusDot.className = 'status-dot waiting';
-            statusText.textContent = 'Waiting for data';
+            statusText.textContent = '等待資料';
         }
     }
 }
@@ -2257,11 +2408,11 @@ function validateAlphanumeric(input, fieldName) {
     const validPattern = /^[a-zA-Z0-9_-]+$/;
     
     if (!input || input.trim() === '') {
-        return { valid: false, message: `${fieldName} cannot be empty` };
+        return { valid: false, message: `${fieldName}不得為空白` };
     }
     
     if (!validPattern.test(input)) {
-        return { valid: false, message: `${fieldName} can only contain English letters, numbers, underscores and hyphens, no other special symbols, Chinese characters or other characters are allowed` };
+        return { valid: false, message: `${fieldName}僅能包含英文字母、數字、底線與連字號，不得包含其他特殊符號或中文字元` };
     }
     
     return { valid: true, message: '' };
@@ -2343,18 +2494,18 @@ function showAddUserForm() {
     const formHtml = `
         <div class="modal-overlay" id="userModal">
             <div class="modal-content">
-                <h4>Add User</h4>
+                <h4>新增使用者</h4>
                 <div class="form-group">
-                    <label>Username</label>
-                    <input type="text" id="newUsername" placeholder="Enter username" maxlength="50">
+                    <label>使用者名稱</label>
+                    <input type="text" id="newUsername" placeholder="輸入使用者名稱" maxlength="50">
                 </div>
                 <div class="form-group">
-                    <label>Password</label>
-                    <input type="password" id="newPassword" placeholder="Enter password" maxlength="100">
+                    <label>密碼</label>
+                    <input type="password" id="newPassword" placeholder="輸入密碼" maxlength="100">
                 </div>
                 <div class="form-actions">
-                    <button class="btn btn-secondary" onclick="closeModal('userModal')">Cancel</button>
-                    <button class="btn btn-success" onclick="submitAddUser()">Add</button>
+                    <button class="btn btn-secondary" onclick="closeModal('userModal')">取消</button>
+                    <button class="btn btn-success" onclick="submitAddUser()">新增</button>
                 </div>
             </div>
         </div>
@@ -2367,26 +2518,26 @@ function submitAddUser() {
     const password = document.getElementById('newPassword').value;
     
     // username
-    const usernameValidation = validateAlphanumeric(username, 'Username');
+    const usernameValidation = validateAlphanumeric(username, '使用者名稱');
     if (!usernameValidation.valid) {
         showAlert(usernameValidation.message, 'error');
         return;
     }
     
     if (username.length < 3 || username.length > 50) {
-        showAlert('Username length must be between 3-50 characters', 'error');
+        showAlert('使用者名稱長度必須介於 3 至 50 個字元', 'error');
         return;
     }
     
     // password
-    const passwordValidation = validateAlphanumeric(password, 'Password');
+    const passwordValidation = validateAlphanumeric(password, '密碼');
     if (!passwordValidation.valid) {
         showAlert(passwordValidation.message, 'error');
         return;
     }
     
     if (password.length < 6 || password.length > 100) {
-        showAlert('Password length must be between 6-100 characters', 'error');
+        showAlert('密碼長度必須介於 6 至 100 個字元', 'error');
         return;
     }
     
@@ -2407,8 +2558,8 @@ async function addUser(username, password) {
         const result = await handleApiResponse(response);
         loadPageContent('users'); // Refresh user list
     } catch (error) {
-        if (error.message !== 'Unauthorized access') {
-            showAlert('Failed to add user: ' + error.message, 'error');
+        if (error.message !== '未授權存取') {
+            showAlert('新增使用者失敗：' + error.message, 'error');
         }
     }
 }
@@ -2418,26 +2569,26 @@ function editUser(username) {
     const formHtml = `
         <div class="modal-overlay" id="editUserModal">
             <div class="modal-content">
-                <h4>Edit User - ${username}</h4>
+                <h4>編輯使用者 - ${username}</h4>
                 ${!isAdmin ? `
                 <div class="form-group">
-                    <label>Username</label>
+                    <label>使用者名稱</label>
                     <input type="text" id="editUsername" value="${username}" maxlength="50">
                 </div>
                 ` : `
                 <div class="form-group">
-                    <label>Username</label>
+                    <label>使用者名稱</label>
                     <input type="text" value="${username}" disabled>
-                    <small>Administrator username cannot be modified</small>
+                    <small>管理員的使用者名稱無法修改</small>
                 </div>
                 `}
                 <div class="form-group">
-                    <label>New Password (Optional)</label>
-                    <input type="password" id="editPassword" placeholder="Leave blank to keep current password" maxlength="100">
+                    <label>新密碼（選填）</label>
+                    <input type="password" id="editPassword" placeholder="留白可保留目前密碼" maxlength="100">
                 </div>
                 <div class="form-actions">
-                    <button class="btn btn-secondary" onclick="closeModal('editUserModal')">Cancel</button>
-                    <button class="btn btn-success" onclick="submitEditUser('${username}')">Save</button>
+                    <button class="btn btn-secondary" onclick="closeModal('editUserModal')">取消</button>
+                    <button class="btn btn-success" onclick="submitEditUser('${username}')">儲存</button>
                 </div>
             </div>
         </div>
@@ -2453,13 +2604,13 @@ function submitEditUser(originalUsername) {
     
     // If password is entered, validate and add to update data
     if (newPassword) {
-        const passwordValidation = validateAlphanumeric(newPassword, 'Password');
+        const passwordValidation = validateAlphanumeric(newPassword, '密碼');
         if (!passwordValidation.valid) {
             showAlert(passwordValidation.message, 'error');
             return;
         }
         if (newPassword.length < 6 || newPassword.length > 100) {
-            showAlert('Password length must be between 6-100 characters', 'error');
+            showAlert('密碼長度必須介於 6 至 100 個字元', 'error');
             return;
         }
         updateData.password = newPassword;
@@ -2467,13 +2618,13 @@ function submitEditUser(originalUsername) {
     
     // If not admin and username has changed
     if (originalUsername !== 'admin' && newUsername && newUsername !== originalUsername) {
-        const usernameValidation = validateAlphanumeric(newUsername, 'Username');
+        const usernameValidation = validateAlphanumeric(newUsername, '使用者名稱');
         if (!usernameValidation.valid) {
             showAlert(usernameValidation.message, 'error');
             return;
         }
         if (newUsername.length < 3 || newUsername.length > 50) {
-            showAlert('Username length must be between 3-50 characters', 'error');
+            showAlert('使用者名稱長度必須介於 3 至 50 個字元', 'error');
             return;
         }
         updateData.username = newUsername;
@@ -2481,7 +2632,7 @@ function submitEditUser(originalUsername) {
     
     // Check if there are any updates
     if (Object.keys(updateData).length === 0) {
-        showAlert('No changes made', 'warning');
+        showAlert('沒有需要儲存的變更', 'warning');
         return;
     }
     
@@ -2502,8 +2653,8 @@ async function updateUser(username, data) {
         showAlert(result.message, 'success');
         loadPageContent('users'); // Refresh user list
     } catch (error) {
-        if (error.message !== 'Unauthorized access') {
-            showAlert('Failed to update user: ' + error.message, 'error');
+        if (error.message !== '未授權存取') {
+            showAlert('更新使用者失敗：' + error.message, 'error');
         }
     }
 }
@@ -2511,8 +2662,8 @@ async function updateUser(username, data) {
 function deleteUser(username) {
     // console.log('deleteUser called with username:', username);
     showConfirmDialog(
-        'Confirm Delete User',
-        `Are you sure you want to delete user "${username}"? This action cannot be undone.`,
+        '確認刪除使用者',
+        `確定要刪除使用者「${username}」嗎？此操作無法復原。`,
         () => {
             // console.log('User confirmed deletion');
             removeUser(username);
@@ -2538,8 +2689,8 @@ async function removeUser(username) {
         loadPageContent('users'); // Refresh user list
     } catch (error) {
         // console.error('Error in removeUser:', error);
-        if (error.message !== 'Unauthorized access') {
-            showAlert('Failed to delete user: ' + error.message, 'error');
+        if (error.message !== '未授權存取') {
+            showAlert('刪除使用者失敗：' + error.message, 'error');
         }
     }
 }
@@ -2547,7 +2698,7 @@ async function removeUser(username) {
 // Mount point management functions
 async function showAddMountForm() {
     // Get user list for dropdown selection
-    let usersOptions = '<option value="">No user binding</option>';
+    let usersOptions = '<option value="">不綁定使用者</option>';
     try {
         const response = await fetch('/api/users');
         if (response.ok) {
@@ -2563,24 +2714,24 @@ async function showAddMountForm() {
     const formHtml = `
         <div class="modal-overlay" id="mountModal">
             <div class="modal-content">
-                <h4>Add Mount Point</h4>
+                <h4>新增掛載點</h4>
                 <div class="form-group">
-                    <label>Mount Point Name</label>
-                    <input type="text" id="newMountName" placeholder="Enter mount point name" maxlength="50">
+                    <label>掛載點名稱</label>
+                    <input type="text" id="newMountName" placeholder="輸入掛載點名稱" maxlength="50">
                 </div>
                 <div class="form-group">
-                    <label>Password (NTRIP 1.0)</label>
-                    <input type="password" id="newMountPassword" placeholder="Enter password" maxlength="100">
+                    <label>密碼（NTRIP 1.0）</label>
+                    <input type="password" id="newMountPassword" placeholder="輸入密碼" maxlength="100">
                 </div>
                 <div class="form-group">
-                    <label>Bind User (NTRIP 2.0)</label>
+                    <label>綁定使用者（NTRIP 2.0）</label>
                     <select id="newMountUser">
                         ${usersOptions}
                     </select>
                 </div>
                 <div class="form-actions">
-                    <button class="btn btn-secondary" onclick="closeModal('mountModal')">Cancel</button>
-                    <button class="btn btn-success" onclick="submitAddMount()">Add</button>
+                    <button class="btn btn-secondary" onclick="closeModal('mountModal')">取消</button>
+                    <button class="btn btn-success" onclick="submitAddMount()">新增</button>
                 </div>
             </div>
         </div>
@@ -2594,26 +2745,26 @@ function submitAddMount() {
     const userId = document.getElementById('newMountUser').value;
     
     // Validate mount point name
-    const mountNameValidation = validateAlphanumeric(mountName, 'Mount point name');
+    const mountNameValidation = validateAlphanumeric(mountName, '掛載點名稱');
     if (!mountNameValidation.valid) {
         showAlert(mountNameValidation.message, 'error');
         return;
     }
     
     // Validate password
-    const passwordValidation = validateAlphanumeric(password, 'Password');
+    const passwordValidation = validateAlphanumeric(password, '密碼');
     if (!passwordValidation.valid) {
         showAlert(passwordValidation.message, 'error');
         return;
     }
     
     if (mountName.length < 3 || mountName.length > 50) {
-        showAlert('Mount point name length must be between 3-50 characters', 'error');
+        showAlert('掛載點名稱長度必須介於 3 至 50 個字元', 'error');
         return;
     }
     
     if (password.length < 6 || password.length > 100) {
-        showAlert('Password length must be between 6-100 characters', 'error');
+        showAlert('密碼長度必須介於 6 至 100 個字元', 'error');
         return;
     }
     
@@ -2639,8 +2790,8 @@ async function addMount(mountData) {
         const result = await handleApiResponse(response);
         loadPageContent('mounts'); // Refresh mount point list
     } catch (error) {
-        if (error.message !== 'Unauthorized access') {
-            showAlert('Failed to add mount point: ' + error.message, 'error');
+        if (error.message !== '未授權存取') {
+            showAlert('新增掛載點失敗：' + error.message, 'error');
         }
     }
 }
@@ -2675,22 +2826,22 @@ async function editMount(mount) {
     const formHtml = `
         <div class="modal-overlay" id="editMountModal">
             <div class="modal-content">
-                <h4>Edit Mount Point - ${mount}</h4>
+                <h4>編輯掛載點 - ${mount}</h4>
                 <div class="form-group">
-                    <label>Mount Point Name</label>
+                    <label>掛載點名稱</label>
                     <input type="text" id="editMountName" value="${mount}" maxlength="50">
                 </div>
                 <div class="form-group">
-                    <label>New Password (NTRIP 1.0)</label>
-                    <input type="password" id="editMountPassword" placeholder="Leave blank to keep current password" maxlength="100">
+                    <label>新密碼（NTRIP 1.0）</label>
+                    <input type="password" id="editMountPassword" placeholder="留白可保留目前密碼" maxlength="100">
                 </div>
                 <div class="form-group">
-                    <label>Bind User (NTRIP 2.0)</label>
-                    <input type="text" id="editMountUser" value="${currentUsername}" placeholder="Enter username, leave blank for no binding" maxlength="50">
+                    <label>綁定使用者（NTRIP 2.0）</label>
+                    <input type="text" id="editMountUser" value="${currentUsername}" placeholder="輸入使用者名稱；留白表示不綁定" maxlength="50">
                 </div>
                 <div class="form-actions">
-                    <button class="btn btn-secondary" onclick="closeModal('editMountModal')">Cancel</button>
-                    <button class="btn btn-success" onclick="submitEditMount('${mount}')">Save</button>
+                    <button class="btn btn-secondary" onclick="closeModal('editMountModal')">取消</button>
+                    <button class="btn btn-success" onclick="submitEditMount('${mount}')">儲存</button>
                 </div>
             </div>
         </div>
@@ -2707,13 +2858,13 @@ async function submitEditMount(originalMount) {
     
     // If password is entered, validate and add to update data
     if (newPassword) {
-        const passwordValidation = validateAlphanumeric(newPassword, 'Password');
+        const passwordValidation = validateAlphanumeric(newPassword, '密碼');
         if (!passwordValidation.valid) {
             showAlert(passwordValidation.message, 'error');
             return;
         }
         if (newPassword.length < 6 || newPassword.length > 100) {
-            showAlert('Password length must be between 6-100 characters', 'error');
+            showAlert('密碼長度必須介於 6 至 100 個字元', 'error');
             return;
         }
         updateData.password = newPassword;
@@ -2721,13 +2872,13 @@ async function submitEditMount(originalMount) {
     
     // If mount point name has changed and is not empty
     if (newMountName && newMountName !== originalMount) {
-        const mountNameValidation = validateAlphanumeric(newMountName, 'Mount point name');
+        const mountNameValidation = validateAlphanumeric(newMountName, '掛載點名稱');
         if (!mountNameValidation.valid) {
             showAlert(mountNameValidation.message, 'error');
             return;
         }
         if (newMountName.length < 3 || newMountName.length > 50) {
-            showAlert('Mount point name length must be between 3-50 characters', 'error');
+            showAlert('掛載點名稱長度必須介於 3 至 50 個字元', 'error');
             return;
         }
         updateData.mount_name = newMountName;
@@ -2735,7 +2886,7 @@ async function submitEditMount(originalMount) {
     
     // Handle username binding
     if (username) {
-        const usernameValidation = validateAlphanumeric(username, 'Username');
+        const usernameValidation = validateAlphanumeric(username, '使用者名稱');
         if (!usernameValidation.valid) {
             showAlert(usernameValidation.message, 'error');
             return;
@@ -2745,7 +2896,7 @@ async function submitEditMount(originalMount) {
     
     // Check if there are any updates
     if (Object.keys(updateData).length === 0) {
-        showAlert('No changes made', 'warning');
+        showAlert('沒有需要儲存的變更', 'warning');
         return;
     }
     
@@ -2767,16 +2918,16 @@ async function updateMount(mount, data) {
         showAlert(result.message, 'success');
         loadPageContent('mounts'); // Refresh mount point list
     } catch (error) {
-        if (error.message !== 'Unauthorized access') {
-            showAlert('Failed to update mount point: ' + error.message, 'error');
+        if (error.message !== '未授權存取') {
+            showAlert('更新掛載點失敗：' + error.message, 'error');
         }
     }
 }
 
 function deleteMount(mount) {
     showConfirmDialog(
-        'Confirm Delete Mount Point',
-        `Are you sure you want to delete mount point "${mount}"? This action cannot be undone.`,
+        '確認刪除掛載點',
+        `確定要刪除掛載點「${mount}」嗎？此操作無法復原。`,
         () => {
             removeMount(mount);
         },
@@ -2796,8 +2947,8 @@ async function removeMount(mount) {
             // Refresh list directly after successful deletion, no success popup
             loadPageContent('mounts'); // Refresh mount point list
         } catch (error) {
-            if (error.message !== 'Unauthorized access') {
-                showAlert('Failed to delete mount point: ' + error.message, 'error');
+            if (error.message !== '未授權存取') {
+                showAlert('刪除掛載點失敗：' + error.message, 'error');
             }
         }
     }
@@ -2809,31 +2960,31 @@ async function removeMount(mount) {
         const confirmPassword = document.getElementById('confirm-password').value;
         
         if (!newPassword || !confirmPassword) {
-            showAlert('Please enter new password and confirm password', 'warning');
+            showAlert('請輸入新密碼並再次確認', 'warning');
             return;
         }
         
         // Validate new password
-        const passwordValidation = validateAlphanumeric(newPassword, 'New password');
+        const passwordValidation = validateAlphanumeric(newPassword, '新密碼');
         if (!passwordValidation.valid) {
             showAlert(passwordValidation.message, 'error');
             return;
         }
         
         // Validate confirm password
-        const confirmPasswordValidation = validateAlphanumeric(confirmPassword, 'Confirm password');
+        const confirmPasswordValidation = validateAlphanumeric(confirmPassword, '確認密碼');
         if (!confirmPasswordValidation.valid) {
             showAlert(confirmPasswordValidation.message, 'error');
             return;
         }
         
         if (newPassword !== confirmPassword) {
-            showAlert('The two passwords entered do not match', 'error');
+            showAlert('兩次輸入的密碼不一致', 'error');
             return;
         }
         
         if (newPassword.length < 6) {
-            showAlert('Password must be at least 6 characters long', 'error');
+            showAlert('密碼至少需要 6 個字元', 'error');
             return;
         }
         
@@ -2849,22 +3000,22 @@ async function removeMount(mount) {
             const result = await response.json();
             
             if (response.ok) {
-                showAlert('Administrator password changed successfully', 'success');
+                showAlert('管理員密碼變更成功', 'success');
                 document.getElementById('admin-password').value = '';
                 document.getElementById('confirm-password').value = '';
             } else {
-                showAlert('Error: ' + result.error, 'error');
+                showAlert('錯誤：' + result.error, 'error');
             }
         } catch (error) {
             // console.error('Failed to change password:', error);
-            showAlert('Failed to change password: ' + error.message, 'error');
+            showAlert('變更密碼失敗：' + error.message, 'error');
         }
     }
     
     async function restartProgram() {
         showConfirmDialog(
-        'Confirm Restart',
-        'Are you sure you want to restart the program? All connections will be disconnected after restart, please proceed with caution!',
+        '確認重新啟動',
+        '確定要重新啟動程式嗎？重新啟動後所有連線都會中斷，請謹慎操作。',
         async function() {
             // Execute restart logic
             await performRestart();
@@ -2883,18 +3034,18 @@ async function performRestart() {
             });
             
             if (response.ok) {
-                showAlert('Program restart command sent, system will restart in 3 seconds...', 'success');
+                showAlert('已送出程式重新啟動指令，系統將於 3 秒後重新啟動...', 'success');
                 // Refresh page after 3 seconds
                 setTimeout(() => {
                     window.location.reload();
                 }, 3000);
             } else {
                 const result = await response.json();
-                showAlert('Restart failed: ' + (result.error || 'Unknown error'), 'error');
+                showAlert('重新啟動失敗：' + (result.error || '未知錯誤'), 'error');
             }
         } catch (error) {
             // console.error('Failed to restart program:', error);
-            showAlert('Failed to restart program: ' + error.message, 'error');
+            showAlert('無法重新啟動程式：' + error.message, 'error');
         }
     }
 
@@ -2936,7 +3087,7 @@ function showAlert(message, type = 'info') {
                 <div style="font-size: 2rem; margin-bottom: 1rem;">${iconMap[type] || iconMap['info']}</div>
                 <p style="margin-bottom: 2rem; color: #666; line-height: 1.5; font-size: 1.1rem;">${message}</p>
                 <div style="display: flex; justify-content: center;">
-                    <button class="btn" style="background: ${colorMap[type] || colorMap['info']}; color: white; border: none;" onclick="closeModal('${modalId}')">OK</button>
+                    <button class="btn" style="background: ${colorMap[type] || colorMap['info']}; color: white; border: none;" onclick="closeModal('${modalId}')">確定</button>
                 </div>
             </div>
         </div>
@@ -2977,8 +3128,8 @@ function showConfirmDialog(title, message, onConfirm, onCancel) {
                 <h4>${title}</h4>
                 <p style="margin-bottom: 2rem; color: #666; line-height: 1.5;">${message}</p>
                 <div style="display: flex; gap: 1rem; justify-content: flex-end;">
-                    <button class="btn btn-secondary" onclick="cancelConfirm()">Cancel</button>
-                    <button class="btn btn-primary" onclick="confirmAction()">YES</button>
+                    <button class="btn btn-secondary" onclick="cancelConfirm()">取消</button>
+                    <button class="btn btn-primary" onclick="confirmAction()">確定</button>
                 </div>
             </div>
         </div>
@@ -3039,8 +3190,8 @@ function cancelConfirm() {
     function logout() {
         // Simplified logout process, execute logout operation directly
         showConfirmDialog(
-            'Confirm Logout',
-            'Are you sure you want to logout?',
+            '確認登出',
+            '確定要登出嗎？',
             () => {
                 fetch('/logout', {
                     method: 'POST',

@@ -9,17 +9,30 @@ import socket
 import configparser
 from pathlib import Path
 from typing import List, Tuple
+from urllib.parse import urlencode
 
-CONFIG_FILE = os.environ.get('NTRIP_CONFIG_FILE', 
-                            os.path.join(os.path.dirname(os.path.dirname(__file__)), 'config.ini'))
+PROJECT_ROOT = Path(__file__).resolve().parent.parent
+
+
+def resolve_project_path(path_value) -> Path:
+    """将相对路径解析为项目根目录下的绝对路径。"""
+    path = Path(path_value).expanduser()
+    if not path.is_absolute():
+        path = PROJECT_ROOT / path
+    return path.resolve()
+
+
+CONFIG_FILE = resolve_project_path(
+    os.environ.get('NTRIP_CONFIG_FILE', PROJECT_ROOT / 'config.ini')
+)
 
 config = configparser.ConfigParser()
 
-if os.path.exists(CONFIG_FILE):
-    print(f"加载配置文件: {CONFIG_FILE}")
-    config.read(CONFIG_FILE, encoding='utf-8')
+if CONFIG_FILE.exists():
+    print(f"載入設定檔：{CONFIG_FILE}")
+    config.read(str(CONFIG_FILE), encoding='utf-8')
 else:
-    raise FileNotFoundError(f"配置文件 {CONFIG_FILE} 不存在")
+    raise FileNotFoundError(f"設定檔 {CONFIG_FILE} 不存在")
 
 def get_config_value(section, key, fallback=None, value_type=str):
     """获取配置值并转换类型"""
@@ -61,6 +74,62 @@ CASTER_COUNTRY = get_config_value('caster', 'country', 'CHN')
 CASTER_LATITUDE = get_config_value('caster', 'latitude', 25.20341154, float)
 CASTER_LONGITUDE = get_config_value('caster', 'longitude', 110.277492, float)
 
+# ==================== 地圖設定 ====================
+
+MAP_PROVIDER = str(get_config_value('map', 'provider', 'osm') or 'osm').strip().lower()
+GOOGLE_MAPS_API_KEY = str(get_config_value('map', 'google_maps_api_key', '') or '').strip()
+MAP_DEFAULT_LATITUDE = get_config_value('map', 'default_latitude', 23.7, float)
+MAP_DEFAULT_LONGITUDE = get_config_value('map', 'default_longitude', 121.0, float)
+MAP_DEFAULT_ZOOM = get_config_value('map', 'default_zoom', 7, int)
+
+GOOGLE_MAPS_KEY_PLACEHOLDERS = {
+    'your_demo_key',
+    'your_api_key',
+    'replace_with_google_maps_api_key',
+}
+
+
+def has_google_maps_api_key():
+    """只判斷是否有可供瀏覽器載入 API 的非範例值，不記錄或回傳金鑰。"""
+    normalized = str(GOOGLE_MAPS_API_KEY or '').strip()
+    return bool(normalized) and normalized.lower() not in GOOGLE_MAPS_KEY_PLACEHOLDERS
+
+
+def get_effective_map_provider():
+    """Google 未啟用或缺少金鑰時，固定安全回退至 OpenStreetMap。"""
+    if MAP_PROVIDER == 'google' and has_google_maps_api_key():
+        return 'google'
+    return 'osm'
+
+
+def get_public_map_config():
+    """回傳可公開給前端的地圖設定；內容刻意不包含 Google API Key。"""
+    effective_provider = get_effective_map_provider()
+    return {
+        'provider': effective_provider,
+        'google_enabled': effective_provider == 'google',
+        'default_latitude': MAP_DEFAULT_LATITUDE,
+        'default_longitude': MAP_DEFAULT_LONGITUDE,
+        'default_zoom': MAP_DEFAULT_ZOOM,
+    }
+
+
+def get_google_maps_script_url():
+    """建立官方 Maps JavaScript API URL；金鑰只會出現在此瀏覽器載入網址。"""
+    if get_effective_map_provider() != 'google':
+        return None
+
+    query = urlencode({
+        'key': GOOGLE_MAPS_API_KEY,
+        'loading': 'async',
+        'callback': 'googleMapsApiReady',
+        'v': 'weekly',
+        'language': 'zh-TW',
+        'region': 'TW',
+        'auth_referrer_policy': 'origin',
+    })
+    return f'https://maps.googleapis.com/maps/api/js?{query}'
+
 # ==================== 网络配置 ====================
 
 def get_all_network_interfaces() -> List[Tuple[str, str]]:
@@ -90,17 +159,7 @@ def get_all_network_interfaces() -> List[Tuple[str, str]]:
 def get_private_ips() -> List[Tuple[str, str]]:
     """获取所有内网IP地址（仅检测实际可用的IP，不强制添加回环地址）"""
     private_ips = []
-    
-    try:
-       
-        with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as s:
-            s.connect(("8.8.8.8", 80))
-            primary_ip = s.getsockname()[0]
-            private_ips.append(("Primary", primary_ip))
-    except Exception:
-        pass
-    
-    
+
     try:
         hostname = socket.gethostname()
         for info in socket.getaddrinfo(hostname, None):
@@ -123,11 +182,11 @@ def get_private_ips() -> List[Tuple[str, str]]:
     
     return private_ips
 
-def get_display_urls(port: int, service_name: str = "服务") -> List[str]:
+def get_display_urls(port: int, service_name: str = "服务", listen_host: str = None) -> List[str]:
     """获取用于显示的所有可访问URL"""
     urls = []
     
-    listen_host = get_config_value('network', 'host', '0.0.0.0')
+    listen_host = listen_host or globals().get('HOST') or get_config_value('network', 'host', '127.0.0.1')
     
     if listen_host == '0.0.0.0':
         
@@ -140,13 +199,13 @@ def get_display_urls(port: int, service_name: str = "服务") -> List[str]:
     return urls
 
 # 网络配置
-HOST = get_config_value('network', 'host', '0.0.0.0') 
+HOST = get_config_value('network', 'host', '127.0.0.1')
 
 
-NTRIP_HOST = HOST  
+NTRIP_HOST = get_config_value('ntrip', 'host', HOST)
 NTRIP_PORT = get_config_value('ntrip', 'port', 2101, int)  # NTRIP服务端口
 
-WEB_HOST = HOST  # Web服务监听地址
+WEB_HOST = get_config_value('web', 'host', HOST)  # Web服务监听地址
 WEB_PORT = get_config_value('web', 'port', 5757, int)      # Web服务端口
 
 # 最大连接数
@@ -158,13 +217,13 @@ MAX_BUFFER_SIZE = get_config_value('network', 'max_buffer_size', 655360, int) # 
 
 # ==================== 数据库配置 ====================
 
-DATABASE_PATH = get_config_value('database', 'path', '2rtk.db')
+DATABASE_PATH = resolve_project_path(get_config_value('database', 'path', '2rtk.db'))
 DB_POOL_SIZE = get_config_value('database', 'pool_size', 10, int)
 DB_TIMEOUT = get_config_value('database', 'timeout', 30, int)
 
 # ==================== 日志配置 ====================
 
-LOG_DIR = get_config_value('logging', 'log_dir', 'logs')
+LOG_DIR = resolve_project_path(get_config_value('logging', 'log_dir', 'logs'))
 LOG_FILES = {
     'main': get_config_value('logging', 'main_log_file', 'main.log'),
     'ntrip': get_config_value('logging', 'ntrip_log_file', 'ntrip.log'), 
@@ -181,8 +240,8 @@ LOG_BACKUP_COUNT = get_config_value('logging', 'backup_count', 5, int)  # 保留
 
 LOG_FREQUENT_STATUS = get_config_value('logging', 'log_frequent_status', False, bool)
 
-# Flask密钥 (生产环境中请修改)
-SECRET_KEY = get_config_value('security', 'secret_key', '8f4a9c2e7d1b6f3a5e8d7c9b2a4f6e3d5c8b7a9f2e4d6c8b3a5f7e9d1c2b4a6')
+# Flask 密鑰；不得提供可直接使用的預設值。
+SECRET_KEY = get_config_value('security', 'secret_key', None)
 FLASK_SECRET_KEY = SECRET_KEY  # Flask应用密钥
 
 # 密码哈希配置
@@ -192,7 +251,7 @@ SESSION_TIMEOUT = get_config_value('security', 'session_timeout', 3600, int)  # 
 # 默认管理员账户
 DEFAULT_ADMIN = {
     'username': get_config_value('admin', 'username', 'admin'),
-    'password': get_config_value('admin', 'password', 'admin123')
+    'password': get_config_value('admin', 'password', None)
 }
 
 # ==================== NTRIP协议配置 ====================
@@ -312,7 +371,18 @@ MEMORY_WARNING_THRESHOLD = get_config_value('performance', 'memory_warning_thres
 
 def load_from_env():
     """从环境变量加载配置"""
-    global NTRIP_PORT, WEB_PORT, DEBUG, DATABASE_PATH
+    global HOST, NTRIP_HOST, WEB_HOST, NTRIP_PORT, WEB_PORT
+    global DEBUG, DATABASE_PATH, SECRET_KEY, FLASK_SECRET_KEY
+    global MAP_PROVIDER, GOOGLE_MAPS_API_KEY
+
+    # 容器部署必须明确设置专用变量；Windows 未设置時仍使用 config.ini 的 127.0.0.1。
+    ntrip_listen_host = os.environ.get('NTRIP_LISTEN_HOST', '').strip()
+    web_listen_host = os.environ.get('WEB_LISTEN_HOST', '').strip()
+    if ntrip_listen_host:
+        NTRIP_HOST = ntrip_listen_host
+        HOST = ntrip_listen_host
+    if web_listen_host:
+        WEB_HOST = web_listen_host
     
     # NTRIP端口
     if 'NTRIP_PORT' in os.environ:
@@ -334,36 +404,94 @@ def load_from_env():
     
     # 数据库路径
     if 'DATABASE_PATH' in os.environ:
-        DATABASE_PATH = os.environ['DATABASE_PATH']
+        DATABASE_PATH = resolve_project_path(os.environ['DATABASE_PATH'])
     
     # 密钥
     if 'SECRET_KEY' in os.environ:
-        global SECRET_KEY
         SECRET_KEY = os.environ['SECRET_KEY']
+
+    # Google Maps 金鑰僅保留於記憶體，環境變數優先於本機設定檔。
+    if 'GOOGLE_MAPS_API_KEY' in os.environ:
+        GOOGLE_MAPS_API_KEY = os.environ['GOOGLE_MAPS_API_KEY'].strip()
+
+    requested_map_provider = os.environ.get('MAP_PROVIDER', '').strip().lower()
+    if requested_map_provider in {'osm', 'google'}:
+        MAP_PROVIDER = requested_map_provider
+
+    FLASK_SECRET_KEY = SECRET_KEY
+
+
+EXAMPLE_VALUE_MARKERS = (
+    'replace_with_',
+    'replace-',
+    'change_this',
+    'change-this',
+    'changeme',
+    'example',
+    'placeholder',
+    'your-secret',
+    'your_password',
+    'your-password',
+)
+
+
+def _looks_like_example_value(value):
+    normalized = str(value or '').strip().lower()
+    return not normalized or any(marker in normalized for marker in EXAMPLE_VALUE_MARKERS)
+
+
+def _is_secure_secret_key(value):
+    secret_value = str(value or '').strip()
+    if _looks_like_example_value(secret_value):
+        return False
+    if len(secret_value) < 32:
+        return False
+    return len(set(secret_value)) >= 8
+
+
+def _is_valid_admin_password(value):
+    password = str(value or '').strip()
+    if _looks_like_example_value(password):
+        return False
+    return password.lower() != ('admin' + '123')
 
 # ==================== 配置验证 ====================
 
 def validate_config():
     """验证配置参数的有效性"""
     errors = []
+
+    if not _is_secure_secret_key(SECRET_KEY):
+        errors.append(
+            'security.secret_key 缺少或不安全，請使用 Python secrets 產生至少 32 個字元的隨機值'
+        )
+
+    if not _is_valid_admin_password(DEFAULT_ADMIN.get('password')):
+        errors.append(
+            'admin.password 不得為空白、已知預設密碼或範例佔位值，請設定專用強密碼'
+        )
     
     # 验证端口范围
     if not (1024 <= NTRIP_PORT <= 65535):
-        errors.append(f"NTRIP端口 {NTRIP_PORT} 不在有效范围内 (1024-65535)")
+        errors.append(f"NTRIP 連接埠 {NTRIP_PORT} 不在有效範圍內（1024-65535）")
     
     if not (1024 <= WEB_PORT <= 65535):
-        errors.append(f"Web端口 {WEB_PORT} 不在有效范围内 (1024-65535)")
+        errors.append(f"Web 連接埠 {WEB_PORT} 不在有效範圍內（1024-65535）")
     
     # 验证缓冲区大小
     if BUFFER_SIZE <= 0 or BUFFER_SIZE > MAX_BUFFER_SIZE:
-        errors.append(f"缓冲区大小 {BUFFER_SIZE} 无效")
+        errors.append(f"緩衝區大小 {BUFFER_SIZE} 無效")
     
-    # 验证日志目录
-    if not os.path.exists(LOG_DIR):
+    # 验证数据库和日志目录
+    required_directories = {
+        '資料庫目錄': DATABASE_PATH.parent,
+        '日誌目錄': LOG_DIR,
+    }
+    for directory_name, directory_path in required_directories.items():
         try:
-            os.makedirs(LOG_DIR)
+            directory_path.mkdir(parents=True, exist_ok=True)
         except Exception as e:
-            errors.append(f"无法创建日志目录 {LOG_DIR}: {e}")
+            errors.append(f"無法建立{directory_name} {directory_path}：{e}")
     
     return errors
 
@@ -375,10 +503,8 @@ def init_config():
     
     errors = validate_config()
     if errors:
-        # print("配置验证失败:")
-    # for error in errors:
-    #     print(f"  - {error}")
-        return False
+        details = '\n'.join(f'- {error}' for error in errors)
+        raise ValueError(f"設定驗證失敗：\n{details}")
     
     return True
 
@@ -394,7 +520,7 @@ def get_config_dict():
         'web_port': WEB_PORT,
         'max_connections': MAX_CONNECTIONS,
         'buffer_size': BUFFER_SIZE,
-        'database_path': DATABASE_PATH,
+        'database_path': str(DATABASE_PATH),
         'log_level': LOG_LEVEL,
         'tcp_keepalive': TCP_KEEPALIVE,
         'ring_buffer_size': RING_BUFFER_SIZE,

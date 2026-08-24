@@ -22,27 +22,32 @@
 
 ## 安装教程
 
-### Docker 部署（推荐）
-推荐一键部署，无需手动配置。
+### Windows 11 原生部署
+
+- 使用 **64-bit Python 3.11**，不需要 Docker、WSL、Linux 或 Redis。
+- **繁體中文說明**：[Windows 11 原生安裝與啟動](WINDOWS-INSTALL.md)
+
+### Docker 部署
+
+先安全建立被 Git 忽略的 `.env`，於首次啟動前在本機確認設定，再驗證 Compose：
+
 ```bash
-# 拉取并直接运行，镜像会自动创建所需目录和配置文件
-docker run -d \
-  --name ntrip-caster \
-  -p 2101:2101 \
-  -p 5757:5757 \
-  2rtk/ntripcaster:latest
+python3 scripts/deployment_config.py prepare-env --env-file .env --example .env.example
+docker compose config --quiet
+docker compose up -d ntrip-caster
 ```
-- **中文教程**: [Docker 安装和使用教程](DOCKER-TUTORIAL.md)
+
+- Web 預設只發布於 `127.0.0.1:5757`；NTRIP 預設對外發布 TCP 2101。
+- 請以防火牆限制 NTRIP 來源，且不得公開 `.env` 或執行設定。
+- **繁體中文教程**：[Docker 安裝與使用](DOCKER-TUTORIAL.md)
 - **English Tutorial**: [Docker Installation and Usage Guide](DOCKER-TUTORIAL-EN.md)
 
 ### Debian系统原生安装
 - **中文教程**: [Linux 系统原生安装教程](INSTALL-TUTORIAL.md)
 - **English Tutorial**: [Linux Native Installation Guide](INSTALL-TUTORIAL-EN.md)
 
-**访问地址**:
--  Web管理界面: `http://yourserverip:5757`
--  NTRIP服务: `ntrip://yourserverip:2101`
--  默认账号: `admin` / `admin123` (记得修改默认密码)
+原生 Web 管理預設使用 `http://127.0.0.1:5757`。NTRIP 使用 TCP 2101，只有在營運者明確設定
+監聽、連接埠發布與防火牆後才應對外提供。
 
 ## 硬件推荐
 
@@ -85,7 +90,8 @@ docker run -d \
 | **2000+** | 16核心+ | 16GB+ | 100GB+ | 500Mbps+ |
 
 ### 云服务器推荐
-云服务器部署请在安全设置中开启5757和2101端口
+雲端部署只有在遠端 NTRIP 用戶端需要時才開放 TCP 2101；Web 管理介面應保持本機存取，或置於
+具 TLS 與來源限制的安全反向代理之後。
 #### AWS EC2
 - **入门型**: t3.small (2核2GB)
 - **标准型**: c5.large (2核4GB)
@@ -104,25 +110,31 @@ docker run -d \
 ### 主要配置选项
 
 ```ini
-[ntrip]
-port = 2101                    # NTRIP服务端口
-max_connections = 5000         # 最大连接数
+[network]
+host = 127.0.0.1              # 原生執行安全預設
+max_connections = 5000
 
-[web] 
-port = 5757                    # Web管理端口
-refresh_interval = 10          # 数据刷新间隔
+[ntrip]
+host = 127.0.0.1
+port = 2101                    # NTRIP 服務連接埠
+
+[web]
+host = 127.0.0.1
+port = 5757                    # Web 管理連接埠
 
 [performance]
-thread_pool_size = 5000        # 并发连接线程池大小
-max_workers = 5000             # 最大工作线程
-ring_buffer_size = 60          # 环形缓冲区大小
+thread_pool_size = 5000        # 連線執行緒池大小
+max_workers = 5000             # 最大工作執行緒
+
+[data_forwarding]
+ring_buffer_size = 60          # 環形緩衝區大小
 
 [security]
-secret_key = your-secret-key   # 生产环境请修改默认的key
+secret_key = REPLACE_WITH_RANDOM_SECRET_KEY
 
 [admin]
 username = admin               # 管理员用户名
-password = admin123            # 管理员密码（生产环境请修改）
+password = REPLACE_WITH_STRONG_ADMIN_PASSWORD
 ```
 
 ### 常见问题诊断
@@ -145,9 +157,8 @@ sudo fuser -k 2101/tcp             # 强制释放端口
 sudo ufw status                    # Ubuntu防火墙
 sudo firewall-cmd --list-all       # CentOS防火墙
 
-# 开放端口
-sudo ufw allow 2101/tcp            # NTRIP端口
-sudo ufw allow 5757/tcp            # Web管理端口
+# 僅在需要遠端 NTRIP 用戶端時開放
+sudo ufw allow 2101/tcp
 
 # 网络连通性测试
 telnet localhost 2101              # 测试NTRIP端口
@@ -197,12 +208,16 @@ top -p $(pgrep -f "python.*main.py")
 ```ini
 # config.ini 优化配置
 [ntrip]
-max_connections = 10000            # 最大连接数
 port = 2101
+
+[network]
+max_connections = 10000            # 最大連線數
 
 [performance]
 thread_pool_size = 10000           # 线程池大小
 max_workers = 10000                # 最大工作线程
+
+[data_forwarding]
 ring_buffer_size = 60              # 环形缓冲区
 
 [network]
@@ -216,10 +231,10 @@ timeout = 30                       # 连接超时
 ```ini
 # config.ini 日志配置
 [logging]
-level = INFO                       # DEBUG, INFO, WARNING, ERROR
-format = json                      # json, text
-rotate_size = 100MB               # 日志轮转大小
-rotate_count = 10                 # 保留日志文件数
+log_level = INFO                   # DEBUG、INFO、WARNING、ERROR
+log_dir = logs
+max_log_size = 10485760
+backup_count = 10
 ```
 
 ## 贡献

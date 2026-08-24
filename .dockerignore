@@ -100,6 +100,11 @@ COPYING*
 INSTALL*
 NEWS*
 TODO*
+!LICENSE
+!THIRD-PARTY-NOTICES.md
+!TERMS-OF-USE.md
+!PRIVACY-POLICY.md
+!static/vendor/openlayers/8.2.0/LICENSE.md
 
 # 测试相关
 tests/
@@ -127,6 +132,10 @@ docker-compose*
 .env.*
 !.env.example
 .envrc
+config.ini
+config.windows.local.ini
+secrets/
+backup/
 secrets.yml
 secrets.yaml
 *.key
@@ -142,6 +151,7 @@ uninstall.sh
 deploy.sh
 *.sh
 !docker-deploy.sh
+!docker-entrypoint.sh
 
 # 外部配置和服务
 monitoring/
