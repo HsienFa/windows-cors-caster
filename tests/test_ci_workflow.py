@@ -17,16 +17,54 @@ class GitHubActionsWorkflowTests(unittest.TestCase):
         cls.source = WORKFLOW_PATH.read_text(encoding="utf-8")
         cls.lower_source = cls.source.lower()
 
+    @classmethod
+    def _job_source(cls, job_name):
+        match = re.search(
+            rf"(?ms)^  {re.escape(job_name)}:\n(?P<body>.*?)(?=^  [a-z0-9_-]+:\n|\Z)",
+            cls.source,
+        )
+        if match is None:
+            raise AssertionError(f"Workflow job not found: {job_name}")
+        return match.group("body")
+
     def test_triggers_permissions_runner_and_python_version(self):
         self.assertIn("push:\n    branches:\n      - windows-native-compat", self.source)
         self.assertIn("pull_request:\n    branches:\n      - main", self.source)
         self.assertRegex(self.source, r"(?m)^  workflow_dispatch:\s*$")
         self.assertIn("permissions:\n  contents: read", self.source)
         self.assertEqual(self.source.count("runs-on: ubuntu-latest"), 2)
-        self.assertEqual(self.source.count("uses: actions/checkout@v4"), 2)
-        self.assertEqual(self.source.count("persist-credentials: false"), 2)
-        self.assertEqual(self.source.count("uses: actions/setup-python@v5"), 2)
-        self.assertEqual(self.source.count('python-version: "3.11"'), 2)
+        self.assertEqual(self.source.count("runs-on: windows-latest"), 1)
+        self.assertEqual(self.source.count("uses: actions/checkout@v4"), 3)
+        self.assertEqual(self.source.count("persist-credentials: false"), 3)
+        self.assertEqual(self.source.count("uses: actions/setup-python@v5"), 3)
+        self.assertEqual(self.source.count('python-version: "3.11"'), 3)
+
+    def test_cmd_checks_run_on_windows_and_skip_safely_elsewhere(self):
+        ubuntu_job = self._job_source("application-tests")
+        windows_job = self._job_source("windows-native-tests")
+        windows_tests = (PROJECT_ROOT / "tests" / "test_windows_compat.py").read_text(
+            encoding="utf-8"
+        )
+
+        self.assertIn("runs-on: windows-latest", windows_job)
+        self.assertIn('python-version: "3.11"', windows_job)
+        self.assertIn("python -m pip install -r requirements.txt", windows_job)
+        self.assertIn(
+            'python -m unittest discover -s tests -p "test_windows_compat.py"',
+            windows_job,
+        )
+        self.assertNotIn("cmd.exe", ubuntu_job.lower())
+        self.assertNotIn("continue-on-error", self.lower_source)
+        self.assertNotRegex(self.lower_source, r"(?m)\|\|\s*(?:true|exit\s+0)\b")
+
+        self.assertIn("if sys.platform != 'win32':", windows_tests)
+        self.assertIn("self.skipTest('requires Windows cmd.exe')", windows_tests)
+        self.assertIn("def test_batch_check_mode_does_not_start_python", windows_tests)
+        self.assertIn("def test_batch_check_mode_reports_missing_required_paths", windows_tests)
+        self.assertIn("with self.subTest(missing=missing):", windows_tests)
+        for missing_case in ("venv", "python", "main", "config"):
+            self.assertRegex(windows_tests, rf"(?m)^\s+'{missing_case}':")
+        self.assertEqual(windows_tests.count("self._require_windows_cmd()"), 2)
 
     def test_full_required_test_groups_and_syntax_checks_are_present(self):
         required_test_files = (

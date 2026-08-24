@@ -43,7 +43,6 @@ services:
         max_failure_ratio: 0.3
     # 生产环境安全设置
     security_opt:
-      - no-new-privileges:true
       - apparmor:docker-default
     read_only: true
     tmpfs:

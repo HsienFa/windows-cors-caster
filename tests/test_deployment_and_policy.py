@@ -8,6 +8,7 @@ import contextlib
 import importlib.util
 import io
 import os
+import re
 import secrets
 import tempfile
 import unittest
@@ -24,6 +25,27 @@ def load_deployment_helper():
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
     return module
+
+
+def read_compose_security_options(path):
+    source = path.read_text(encoding="utf-8")
+    service_pattern = re.compile(
+        r"(?ms)^  (?P<service>[a-z0-9_-]+):\n"
+        r"(?P<body>.*?)(?=^  [a-z0-9_-]+:\n|^\S|\Z)"
+    )
+    option_pattern = re.compile(
+        r"(?m)^    security_opt:\n(?P<items>(?:      - [^\n]+\n?)+)"
+    )
+    result = {}
+    for service_match in service_pattern.finditer(source):
+        option_match = option_pattern.search(service_match.group("body"))
+        if option_match is None:
+            continue
+        result[service_match.group("service")] = [
+            line.strip()[2:].strip()
+            for line in option_match.group("items").splitlines()
+        ]
+    return result
 
 
 class DeploymentConfigHelperTests(unittest.TestCase):
@@ -187,18 +209,58 @@ class DockerAndLinuxStaticTests(unittest.TestCase):
 
     def test_compose_credentials_have_no_public_default(self):
         compose = (PROJECT_ROOT / "docker-compose.yml").read_text(encoding="utf-8")
+        production = (PROJECT_ROOT / "docker-compose.prod.yml").read_text(encoding="utf-8")
         env_example = (PROJECT_ROOT / ".env.example").read_text(encoding="utf-8")
         unsafe_default = "admin" + "123"
 
         self.assertRegex(env_example, r"(?m)^NTRIP_ADMIN_PASSWORD=$")
         self.assertRegex(env_example, r"(?m)^GRAFANA_ADMIN_PASSWORD=$")
         self.assertNotIn(unsafe_default, compose.lower())
+        self.assertNotIn(unsafe_default, production.lower())
         self.assertNotIn(unsafe_default, env_example.lower())
+        self.assertNotRegex(
+            production,
+            r"(?im)^\s*-\s*(?:NTRIP_ADMIN_PASSWORD|GF_SECURITY_ADMIN_PASSWORD)\s*=",
+        )
         self.assertIn("normalized", compose)
         self.assertIn('""|admin|admin"123"|password|changeme|letmein', compose)
         self.assertIn("*replace_with_*|*placeholder*|*example*", compose)
         self.assertIn('[ "$${#password}" -lt 16 ]', compose)
         self.assertIn("exec /run.sh", compose)
+
+    def test_compose_security_options_are_unique_after_production_merge(self):
+        base_options = read_compose_security_options(PROJECT_ROOT / "docker-compose.yml")
+        production_options = read_compose_security_options(
+            PROJECT_ROOT / "docker-compose.prod.yml"
+        )
+
+        for source_name, options_by_service in (
+            ("base", base_options),
+            ("production", production_options),
+        ):
+            for service, options in options_by_service.items():
+                with self.subTest(source=source_name, service=service):
+                    self.assertEqual(len(options), len(set(options)))
+
+        merged_options = {}
+        for service in base_options.keys() | production_options.keys():
+            merged_options[service] = (
+                base_options.get(service, []) + production_options.get(service, [])
+            )
+            with self.subTest(source="merged", service=service):
+                self.assertEqual(
+                    len(merged_options[service]),
+                    len(set(merged_options[service])),
+                )
+
+        for service, options in base_options.items():
+            with self.subTest(source="base-required", service=service):
+                self.assertIn("no-new-privileges:true", options)
+        self.assertEqual(
+            merged_options["ntrip-caster"].count("no-new-privileges:true"),
+            1,
+        )
+        self.assertIn("apparmor:docker-default", merged_options["ntrip-caster"])
 
     def test_quick_start_prepares_monitoring_credentials_safely(self):
         quick_start = (PROJECT_ROOT / "quick-start.sh").read_text(encoding="utf-8")

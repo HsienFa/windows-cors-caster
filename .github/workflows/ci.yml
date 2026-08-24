@@ -46,7 +46,7 @@ jobs:
       - name: Install Python requirements
         run: python -m pip install -r requirements.txt
 
-      - name: Run Windows compatibility tests
+      - name: Run cross-platform Windows compatibility tests
         run: python -m unittest discover -s tests -p "test_windows_compat.py"
 
       - name: Run Traditional Chinese interface tests
@@ -92,6 +92,29 @@ jobs:
           git diff --check
           git diff --cached --check
           git show --check --format= --no-renames HEAD
+
+  windows-native-tests:
+    name: Windows launcher checks on Python 3.11
+    runs-on: windows-latest
+    timeout-minutes: 15
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install Python requirements
+        shell: pwsh
+        run: python -m pip install -r requirements.txt
+
+      - name: Run all Windows compatibility tests
+        shell: pwsh
+        run: python -m unittest discover -s tests -p "test_windows_compat.py"
 
   deployment-static:
     name: GNU Make and Docker Compose static validation

@@ -191,6 +191,10 @@ class NetworkInspectionTests(unittest.TestCase):
 
 
 class WindowsLauncherTests(unittest.TestCase):
+    def _require_windows_cmd(self):
+        if sys.platform != 'win32':
+            self.skipTest('requires Windows cmd.exe')
+
     def _prepare_batch_test_directory(self, missing=None):
         temporary_directory = tempfile.TemporaryDirectory()
         self.addCleanup(temporary_directory.cleanup)
@@ -262,6 +266,7 @@ class WindowsLauncherTests(unittest.TestCase):
         self.assertNotIn('chcp', batch_script.lower())
 
     def test_batch_check_mode_does_not_start_python(self):
+        self._require_windows_cmd()
         test_root, launcher_path = self._prepare_batch_test_directory()
 
         completed = self._run_batch_check(launcher_path, test_root)
@@ -279,6 +284,7 @@ class WindowsLauncherTests(unittest.TestCase):
 
         for missing, expected_error in expected_errors.items():
             with self.subTest(missing=missing):
+                self._require_windows_cmd()
                 test_root, launcher_path = self._prepare_batch_test_directory(missing=missing)
                 completed = self._run_batch_check(launcher_path, test_root)
 
