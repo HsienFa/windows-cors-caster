@@ -97,10 +97,6 @@ jobs:
     name: GNU Make and Docker Compose static validation
     runs-on: ubuntu-latest
     timeout-minutes: 15
-    env:
-      CI_SECRET_DIR: ${{ runner.temp }}/ntrip-caster-ci
-      CI_ENV_FILE: ${{ runner.temp }}/ntrip-caster-ci/compose.env
-      CI_RUNTIME_CONFIG: ${{ runner.temp }}/ntrip-caster-ci/runtime.ini
     steps:
       - name: Check out repository
         uses: actions/checkout@v4
@@ -120,6 +116,10 @@ jobs:
 
       - name: Prepare ephemeral test credentials
         shell: bash
+        env:
+          CI_SECRET_DIR: ${{ runner.temp }}/ntrip-caster-ci
+          CI_ENV_FILE: ${{ runner.temp }}/ntrip-caster-ci/compose.env
+          CI_RUNTIME_CONFIG: ${{ runner.temp }}/ntrip-caster-ci/runtime.ini
         run: |
           set -euo pipefail
           umask 077
@@ -178,6 +178,8 @@ jobs:
 
       - name: Validate Docker Compose files without starting containers
         shell: bash
+        env:
+          CI_ENV_FILE: ${{ runner.temp }}/ntrip-caster-ci/compose.env
         run: |
           set -euo pipefail
           docker compose version
@@ -194,4 +196,6 @@ jobs:
       - name: Remove ephemeral test credentials
         if: ${{ always() }}
         shell: bash
+        env:
+          CI_SECRET_DIR: ${{ runner.temp }}/ntrip-caster-ci
         run: rm -rf -- "$CI_SECRET_DIR"

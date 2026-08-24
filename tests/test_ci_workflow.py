@@ -85,6 +85,29 @@ class GitHubActionsWorkflowTests(unittest.TestCase):
         self.assertNotIn("secrets.", self.lower_source)
         self.assertNotRegex(self.source, r"(?im)^\s*(?:echo|cat)\s+.*(?:password|secret|token|api[_-]?key)")
 
+    def test_runner_context_is_only_used_in_step_level_env(self):
+        lines = self.source.splitlines()
+        runner_references = [
+            index for index, line in enumerate(lines)
+            if "${{ runner." in line
+        ]
+        self.assertGreater(len(runner_references), 0)
+
+        for index in runner_references:
+            line = lines[index]
+            indentation = len(line) - len(line.lstrip(" "))
+            self.assertEqual(indentation, 10)
+
+            parent = None
+            for candidate in reversed(lines[:index]):
+                if not candidate.strip():
+                    continue
+                candidate_indentation = len(candidate) - len(candidate.lstrip(" "))
+                if candidate_indentation < indentation:
+                    parent = candidate
+                    break
+            self.assertEqual(parent, "        env:")
+
     def test_workflow_only_checks_tracking_for_local_runtime_paths(self):
         self.assertIn("git ls-files -z", self.source)
         self.assertNotIn("config.windows.local.ini).read", self.lower_source)
