@@ -77,7 +77,6 @@ services:
       - ./nginx/nginx.conf:/etc/nginx/nginx.conf:ro
       - ./nginx/conf.d:/etc/nginx/conf.d:ro
       - ./nginx/ssl:/etc/nginx/ssl:ro
-      - nginx-cache:/var/cache/nginx
       - nginx-logs:/var/log/nginx
     environment:
       - TZ=${TZ:-Asia/Taipei}
@@ -281,9 +280,6 @@ volumes:
     driver: local
   
   # Nginx数据卷
-  nginx-cache:
-    name: nginx-cache
-    driver: local
   nginx-logs:
     name: nginx-logs
     driver: local

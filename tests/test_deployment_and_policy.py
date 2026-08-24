@@ -48,6 +48,32 @@ def read_compose_security_options(path):
     return result
 
 
+def read_compose_mount_targets(path):
+    source = path.read_text(encoding="utf-8")
+    service_pattern = re.compile(
+        r"(?ms)^  (?P<service>[a-z0-9_-]+):\n"
+        r"(?P<body>.*?)(?=^  [a-z0-9_-]+:\n|^\S|\Z)"
+    )
+    result = {}
+    for service_match in service_pattern.finditer(source):
+        service_mounts = {"volumes": [], "tmpfs": []}
+        for mount_type in service_mounts:
+            list_match = re.search(
+                rf"(?m)^    {mount_type}:\n(?P<items>(?:      - [^\n]+\n?)+)",
+                service_match.group("body"),
+            )
+            if list_match is None:
+                continue
+            for line in list_match.group("items").splitlines():
+                item = line.strip()[2:].strip()
+                parts = item.split(":")
+                target = parts[1] if mount_type == "volumes" else parts[0]
+                service_mounts[mount_type].append(target)
+        if any(service_mounts.values()):
+            result[service_match.group("service")] = service_mounts
+    return result
+
+
 class DeploymentConfigHelperTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
@@ -261,6 +287,37 @@ class DockerAndLinuxStaticTests(unittest.TestCase):
             1,
         )
         self.assertIn("apparmor:docker-default", merged_options["ntrip-caster"])
+
+    def test_compose_volume_and_tmpfs_targets_do_not_overlap(self):
+        base_mounts = read_compose_mount_targets(PROJECT_ROOT / "docker-compose.yml")
+        production_mounts = read_compose_mount_targets(
+            PROJECT_ROOT / "docker-compose.prod.yml"
+        )
+
+        for service in base_mounts.keys() | production_mounts.keys():
+            merged_volumes = set(base_mounts.get(service, {}).get("volumes", []))
+            merged_volumes.update(
+                production_mounts.get(service, {}).get("volumes", [])
+            )
+            merged_tmpfs = set(base_mounts.get(service, {}).get("tmpfs", []))
+            merged_tmpfs.update(production_mounts.get(service, {}).get("tmpfs", []))
+            with self.subTest(service=service):
+                self.assertEqual(merged_volumes & merged_tmpfs, set())
+
+        nginx_mounts = base_mounts["nginx"]
+        self.assertNotIn("/var/cache/nginx", nginx_mounts["volumes"])
+        self.assertEqual(nginx_mounts["tmpfs"].count("/var/cache/nginx"), 1)
+
+        compose_sources = "\n".join(
+            (PROJECT_ROOT / path).read_text(encoding="utf-8")
+            for path in ("docker-compose.yml", "docker-compose.prod.yml")
+        )
+        self.assertNotIn("nginx-cache", compose_sources)
+        self.assertIn("no-new-privileges:true", compose_sources)
+        self.assertRegex(
+            (PROJECT_ROOT / "docker-compose.yml").read_text(encoding="utf-8"),
+            r"(?ms)^  nginx:.*?^    read_only: true$",
+        )
 
     def test_quick_start_prepares_monitoring_credentials_safely(self):
         quick_start = (PROJECT_ROOT / "quick-start.sh").read_text(encoding="utf-8")

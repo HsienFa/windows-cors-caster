@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import re
+import subprocess
+import tempfile
 import unittest
 from pathlib import Path
 
@@ -48,6 +50,8 @@ class GitHubActionsWorkflowTests(unittest.TestCase):
 
         self.assertIn("runs-on: windows-latest", windows_job)
         self.assertIn('python-version: "3.11"', windows_job)
+        self.assertIn('PYTHONUTF8: "1"', windows_job)
+        self.assertIn('PYTHONIOENCODING: "utf-8"', windows_job)
         self.assertIn("python -m pip install -r requirements.txt", windows_job)
         self.assertIn(
             'python -m unittest discover -s tests -p "test_windows_compat.py"',
@@ -80,8 +84,44 @@ class GitHubActionsWorkflowTests(unittest.TestCase):
         self.assertIn("python -m pip install -r requirements.txt", self.source)
         self.assertIn("ast.parse(source, filename=relative_path)", self.source)
         self.assertIn("node --check", self.source)
-        self.assertIn("git diff --check", self.source)
-        self.assertIn("git show --check --format= --no-renames HEAD", self.source)
+
+    def test_whitespace_check_uses_feature_base_and_rejects_new_violations(self):
+        application_job = self._job_source("application-tests")
+
+        self.assertIn("fetch-depth: 0", application_job)
+        self.assertIn(
+            "PR_BASE_SHA: ${{ github.event.pull_request.base.sha }}",
+            application_job,
+        )
+        self.assertIn('if [ "$GITHUB_EVENT_NAME" = "pull_request" ]', application_job)
+        self.assertIn('base_sha="$PR_BASE_SHA"', application_job)
+        self.assertIn('base_sha="$(git merge-base origin/main HEAD)"', application_job)
+        self.assertIn('git diff --check "${base_sha}...HEAD"', application_job)
+        self.assertNotIn("git show --check", application_job)
+        self.assertNotIn("hash-object -t tree", application_job)
+        self.assertNotIn("4b825dc642cb6eb9a060e54bf8d69288fbee4904", application_job)
+
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            temporary_root = Path(temporary_directory)
+            clean_path = temporary_root / "clean.txt"
+            invalid_path = temporary_root / "invalid.txt"
+            clean_path.write_text("value\n", encoding="utf-8")
+            invalid_path.write_text("value  \n", encoding="utf-8")
+
+            completed = subprocess.run(
+                [
+                    "git", "-c", "core.autocrlf=false", "diff", "--no-index",
+                    "--check", str(clean_path), str(invalid_path),
+                ],
+                capture_output=True,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+                check=False,
+            )
+
+        self.assertNotEqual(completed.returncode, 0)
+        self.assertIn("trailing whitespace", completed.stdout.lower())
 
     def test_make_target_is_static_and_does_not_create_runtime_state(self):
         makefile = (PROJECT_ROOT / "Makefile").read_text(encoding="utf-8")

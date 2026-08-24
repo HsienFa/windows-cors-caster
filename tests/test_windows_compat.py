@@ -257,13 +257,33 @@ class WindowsLauncherTests(unittest.TestCase):
     def test_batch_launcher_uses_quoted_project_paths_and_check_mode(self):
         batch_script = (PROJECT_ROOT / 'start-windows.bat').read_text(encoding='ascii')
 
+        self.assertIn('chcp 65001 >nul', batch_script)
+        self.assertIn('set "PYTHONUTF8=1"', batch_script)
+        self.assertIn('set "PYTHONIOENCODING=utf-8"', batch_script)
         self.assertIn('set "PROJECT_ROOT=%~dp0"', batch_script)
         self.assertIn('set "PYTHON_EXE=%VENV_DIR%\\Scripts\\python.exe"', batch_script)
         self.assertIn('set "MAIN_PATH=%PROJECT_ROOT%main.py"', batch_script)
         self.assertIn('set "CONFIG_PATH=%PROJECT_ROOT%config.windows.local.ini"', batch_script)
         self.assertIn('if /I "%~1"=="--check"', batch_script)
         self.assertIn('Windows launcher check OK', batch_script)
-        self.assertNotIn('chcp', batch_script.lower())
+
+    def test_utf8_environment_supports_traditional_chinese_subprocess_output(self):
+        environment = os.environ.copy()
+        environment['PYTHONUTF8'] = '1'
+        environment['PYTHONIOENCODING'] = 'utf-8'
+
+        completed = subprocess.run(
+            [sys.executable, '-c', "print('繁體中文輸出測試')"],
+            capture_output=True,
+            text=True,
+            encoding='utf-8',
+            errors='strict',
+            env=environment,
+            check=False,
+        )
+
+        self.assertEqual(completed.returncode, 0, completed.stderr)
+        self.assertEqual(completed.stdout.strip(), '繁體中文輸出測試')
 
     def test_batch_check_mode_does_not_start_python(self):
         self._require_windows_cmd()
