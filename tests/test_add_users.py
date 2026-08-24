@@ -6,13 +6,14 @@
 
 import requests
 import json
+import os
 import time
 import sys
 
 # 服务器配置
 WEB_SERVER_URL = "http://192.168.1.4:5757"
 ADMIN_USERNAME = "admin"
-ADMIN_PASSWORD = "admin123"
+ADMIN_PASSWORD = os.environ.get("NTRIP_ADMIN_PASSWORD", "")
 
 def login_admin():
     """管理员登录"""
@@ -59,6 +60,10 @@ def add_user(cookies, username, password):
 
 def main():
     """主函数"""
+    if not ADMIN_PASSWORD:
+        print("错误: 请先设置 NTRIP_ADMIN_PASSWORD 环境变量")
+        sys.exit(1)
+
     print("开始批量添加用户测试...")
     print(f"目标服务器: {WEB_SERVER_URL}")
     print(f"管理员账户: {ADMIN_USERNAME}")

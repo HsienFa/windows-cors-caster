@@ -72,17 +72,21 @@ COPY --from=builder /opt/venv /opt/venv
 RUN pip install --upgrade setuptools>=78.1.1
 
 # 复制应用代码（选择性复制，避免复制不必要的文件）
-COPY --chown=ntrip:ntrip main.py healthcheck.py config.ini.example ./
+COPY --chown=ntrip:ntrip main.py healthcheck.py ./
 COPY --chown=ntrip:ntrip src/ ./src/
 COPY --chown=ntrip:ntrip pyrtcm/ ./pyrtcm/
 COPY --chown=ntrip:ntrip static/ ./static/
 COPY --chown=ntrip:ntrip templates/ ./templates/
+COPY --chown=ntrip:ntrip scripts/deployment_config.py ./scripts/deployment_config.py
+COPY --chown=ntrip:ntrip LICENSE THIRD-PARTY-NOTICES.md TERMS-OF-USE.md PRIVACY-POLICY.md ./
+COPY docker-entrypoint.sh /usr/local/bin/ntrip-docker-entrypoint
 
 # 创建必要的目录并设置权限
 RUN mkdir -p /app/logs /app/data /app/config && \
     chown -R ntrip:ntrip /app && \
     chmod -R 755 /app && \
-    chmod +x /app/main.py /app/healthcheck.py
+    chmod +x /app/main.py /app/healthcheck.py /app/scripts/deployment_config.py && \
+    chmod 755 /usr/local/bin/ntrip-docker-entrypoint
 
 # 创建数据卷挂载点
 VOLUME ["/app/logs", "/app/data", "/app/config"]
@@ -94,34 +98,8 @@ EXPOSE 2101 5757
 HEALTHCHECK --interval=30s --timeout=15s --start-period=90s --retries=3 \
     CMD python /app/healthcheck.py || exit 1
 
-# 创建启动脚本
-RUN echo '#!/bin/bash\n\
-set -e\n\
-\n\
-# 确保目录存在并设置正确权限\n\
-echo "设置目录权限..."\n\
-mkdir -p /app/logs /app/data /app/config\n\
-chown -R ntrip:ntrip /app/logs /app/data /app/config\n\
-chmod -R 755 /app/logs /app/data /app/config\n\
-\n\
-# 初始化配置文件（如果不存在）\n\
-if [ ! -f "/app/config/config.ini" ]; then\n\
-    echo "初始化配置文件..."\n\
-    cp /app/config.ini.example /app/config/config.ini\n\
-    chown ntrip:ntrip /app/config/config.ini\n\
-fi\n\
-\n\
-# 设置配置文件路径\n\
-export NTRIP_CONFIG_FILE="/app/config/config.ini"\n\
-\n\
-# 切换到ntrip用户并启动应用\n\
-echo "启动NTRIP Caster..."\n\
-exec gosu ntrip python /app/main.py' > /app/entrypoint.sh && \
-    chmod +x /app/entrypoint.sh && \
-    chown ntrip:ntrip /app/entrypoint.sh
-
-# 使用tini作为init进程
-ENTRYPOINT ["/usr/bin/tini", "--"]
+# 使用 tini 转发信号，再由专用入口安全建立首次运行配置。
+ENTRYPOINT ["/usr/bin/tini", "--", "/usr/local/bin/ntrip-docker-entrypoint"]
 
 # 启动命令
-CMD ["/app/entrypoint.sh"]
+CMD ["python", "/app/main.py"]

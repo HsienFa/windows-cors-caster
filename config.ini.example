@@ -1,156 +1,114 @@
-# NTRIP Caster 配置文件示例
-# 复制此文件为 config.ini 并根据需要修改配置
+# NTRIP Caster 安全設定範例
+# Windows 請複製為 config.windows.local.ini；手動 Linux 部署可複製為 config.ini。
+# Docker 與 install.sh 會另行建立安全執行設定，不會直接執行此佔位範例。
+# 相對路徑會以專案根目錄為基準，Windows 與 Linux 均可使用。
 
-[NTRIP]
-# NTRIP 服务器配置
-host = 0.0.0.0
-port = 2101
+[app]
+name = 2RTK Ntrip Caster
+version = 2.2.0
+description = Ntrip Caster
+author = 2rtk
+contact = i@jia.by
+website = https://2rtk.com
+
+[caster]
+country = CHN
+latitude = 25.20341154
+longitude = 110.277492
+
+[development]
+debug_mode = false
+
+[network]
+# 安全預設只接受本機連線；確有需要時才改為對外監聽位址。
+host = 127.0.0.1
 max_connections = 1000
-connection_timeout = 30
-data_timeout = 60
+buffer_size = 81920
+max_buffer_size = 655360
 
-# 服务器信息
-server_name = 2RTK NTRIP Caster
-server_version = 2.1.8
-server_description = High-performance NTRIP Caster with RTCM parsing
+[ntrip]
+host = 127.0.0.1
+port = 2101
+supported_versions = 1.0,2.0
+default_version = 1.0
+max_user_connections_per_mount = 3000
+max_users_per_mount = 3000
+max_connections_per_user = 3
+mount_timeout = 1800
+client_timeout = 300
+connection_timeout = 1800
 
-[WEB]
-# Web 管理界面配置
-host = 0.0.0.0
+[web]
+host = 127.0.0.1
 port = 5757
-debug = false
-secret_key = your-secret-key-change-this
+realtime_push_interval = 3
+system_status_interval = 1
+page_refresh_interval = 30
 
-# 会话配置
+[map]
+# 預設使用 OpenStreetMap；只有設為 google 且提供金鑰時才載入 Google Maps。
+provider = osm
+google_maps_api_key =
+default_latitude = 23.7
+default_longitude = 121.0
+default_zoom = 7
+
+[database]
+# 相对路径会解析为 <项目根目录>/data/2rtk.db
+path = data/2rtk.db
+pool_size = 10
+timeout = 30
+
+[logging]
+# 相对路径会解析为 <项目根目录>/logs
+log_dir = logs
+main_log_file = main.log
+ntrip_log_file = ntrip.log
+error_log_file = errors.log
+log_level = WARNING
+log_format = %%(asctime)s - %%(name)s - %%(levelname)s - %%(message)s
+max_log_size = 10485760
+backup_count = 5
+log_frequent_status = false
+
+[security]
+# 必須替換為使用 Python secrets 產生、至少 32 個字元的隨機值。
+secret_key = REPLACE_WITH_RANDOM_SECRET_KEY
+password_hash_rounds = 3
 session_timeout = 3600
-remember_me_duration = 2592000
 
-[DATABASE]
-# 数据库配置
-type = sqlite
-path = /app/data/2rtk.db
+[admin]
+# 必須替換為僅供本機使用的強密碼。
+username = admin
+password = REPLACE_WITH_STRONG_ADMIN_PASSWORD
 
-# 连接池配置（仅适用于 PostgreSQL/MySQL）
-# host = localhost
-# port = 5432
-# username = ntrip
-# password = your-password
-# database = ntrip_caster
-# pool_size = 10
-# max_overflow = 20
+[tcp]
+keepalive_enabled = true
+keepalive_idle = 60
+keepalive_interval = 10
+keepalive_count = 3
+socket_timeout = 120
 
-[LOGGING]
-# 日志配置
-level = INFO
-max_size = 50MB
-max_files = 5
-log_format = %(asctime)s - %(name)s - %(levelname)s - %(message)s
+[data_forwarding]
+ring_buffer_size = 60
+broadcast_interval = 0.01
+data_send_timeout = 5
+client_health_check_interval = 120
 
-# 日志文件路径
-main_log = /app/logs/main.log
-ntrip_log = /app/logs/ntrip.log
-error_log = /app/logs/errors.log
+[rtcm]
+parse_interval = 5
+buffer_size = 1000
+parse_duration = 30
 
-[SECURITY]
-# 安全配置
-enable_rate_limiting = true
-max_requests_per_minute = 60
-max_login_attempts = 5
-lockout_duration = 300
+[websocket]
+ping_timeout = 120
+ping_interval = 15
+enabled = true
 
-# IP 白名单（可选，留空表示允许所有IP）
-allowed_ips = 
-
-# IP 黑名单
-blocked_ips = 
-
-[RTCM]
-# RTCM 数据处理配置
-enable_parsing = true
-max_message_size = 1024
-buffer_size = 4096
-
-# 支持的 RTCM 消息类型
-supported_messages = 1001,1002,1003,1004,1005,1006,1007,1008,1009,1010,1011,1012,1013,1019,1020,1033,1074,1075,1076,1077,1084,1085,1086,1087,1094,1095,1096,1097,1124,1125,1126,1127,1230
-
-[PERFORMANCE]
-# 性能配置
+[performance]
 thread_pool_size = 100
-max_queue_size = 1000
-enable_compression = true
-compression_level = 6
-
-# 缓存配置
-enable_cache = true
-cache_size = 1000
-cache_ttl = 300
-
-[MONITORING]
-# 监控配置
-enable_metrics = true
-metrics_port = 9090
-metrics_path = /metrics
-
-# 健康检查
-health_check_interval = 30
-health_check_timeout = 10
-
-[WEBSOCKET]
-# WebSocket 配置（用于实时数据推送）
-enable_websocket = true
-ping_interval = 25
-ping_timeout = 60
-max_message_size = 1048576
-
-# 已移除 CORS 配置（安全漏洞修复）
-# cors_allowed_origins = *
-
-[BACKUP]
-# 数据备份配置
-enable_auto_backup = true
-backup_interval = 86400
-backup_retention = 7
-backup_path = /app/data/backups
-
-[ALERTS]
-# 告警配置
-enable_alerts = false
-smtp_server = smtp.gmail.com
-smtp_port = 587
-smtp_username = your-email@gmail.com
-smtp_password = your-app-password
-alert_recipients = admin@example.com
-
-# 告警阈值
-max_connection_threshold = 900
-high_cpu_threshold = 80
-high_memory_threshold = 80
-disk_space_threshold = 90
-
-[FEATURES]
-# 功能开关
-enable_user_registration = false
-enable_mount_point_auto_discovery = true
-enable_statistics = true
-enable_real_time_monitoring = true
-
-# 实验性功能
-enable_clustering = false
-enable_load_balancing = false
-
-[ADVANCED]
-# 高级配置
-tcp_keepalive = true
-tcp_nodelay = true
-socket_timeout = 30
-buffer_size = 8192
-
-# 系统限制
-max_memory_usage = 1073741824  # 1GB
-max_cpu_usage = 80
-max_disk_usage = 90
-
-# 调试选项
-enable_debug_mode = false
-debug_log_level = DEBUG
-enable_profiling = false
+max_workers = 100
+connection_queue_size = 1000
+max_memory_usage = 2048
+cpu_warning_threshold = 80
+memory_warning_threshold = 80

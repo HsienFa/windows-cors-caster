@@ -1,0 +1,15 @@
+.venv/
+venv/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+logs/
+*.log
+*.db
+.env
+data/
+config/
+secrets/
+backup/
+config.ini
+config.windows.local.ini

@@ -18,7 +18,7 @@ class RTCM2ParserManager:
         self.str_parsers: Dict[str, Any] = {}  # STR修正线程实例（单独管理）
         self.current_web_mount: Optional[str] = None  # 当前活跃的Web解析挂载点
         self.lock = threading.RLock()
-        log_info("RTCM2数据解析管理器初始化完成")
+        log_info("RTCM2 資料解析管理器初始化完成")
 
     def start_parser(self, mount_name: str, mode: str = "str_fix", duration: int = 30, 
                      push_callback: Optional[Callable[[Dict], None]] = None) -> bool:
@@ -36,19 +36,19 @@ class RTCM2ParserManager:
                     parser = start_str_fix_parser(mount_name, duration, push_callback)
                     # STR修正模式：添加到STR解析器字典
                     self.str_parsers[mount_name] = parser
-                    log_info(f"启动RTCM解析对 [挂载点: {mount_name}进行STR修正, 时长: {duration}s]")
+                    log_info(f"啟動 RTCM 解析以修正 STR [掛載點：{mount_name}，時間：{duration} 秒]")
                 else:  # realtime_web
                     parser = start_web_parser(mount_name, push_callback)
                     # Web解析模式：添加到Web解析器字典
                     self.web_parsers[mount_name] = parser
-                    log_info(f"启动Web端[挂载点: {mount_name}RTCM数据解析]")
+                    log_info(f"啟動 Web 端 RTCM 資料解析 [掛載點：{mount_name}]")
                 
                 # 保持原有兼容性
                 self.parsers[mount_name] = parser
-                log_info(f"已启动对[挂载点: {mount_name}, 模式: {mode}]的RTCM数据解析")
+                log_info(f"已啟動 RTCM 資料解析 [掛載點：{mount_name}，模式：{mode}]")
                 return True
             except Exception as e:
-                log_error(f"启动对[挂载点: {mount_name}]的RTCM数据解析失败: {str(e)}")
+                log_error(f"啟動 RTCM 資料解析失敗 [掛載點：{mount_name}]：{str(e)}")
                 return False
 
     def stop_parser(self, mount_name: str):
@@ -62,14 +62,14 @@ class RTCM2ParserManager:
                 # 从对应的分类字典中删除
                 if mount_name in self.web_parsers:
                     del self.web_parsers[mount_name]
-                    log_info(f"Web端对[挂载点: {mount_name}]RTCM数据解析已关闭")
+                    log_info(f"Web 端 RTCM 資料解析已關閉 [掛載點：{mount_name}]")
 
                 elif mount_name in self.str_parsers:
                     del self.str_parsers[mount_name]
-                    log_info(f"已关闭对[挂载点: {mount_name}]的STR修正解析")
+                    log_info(f"已關閉 STR 修正解析 [掛載點：{mount_name}]")
 
                 else:
-                    log_info(f"已关闭对[挂载点: {mount_name}]的RTCM数据解析")
+                    log_info(f"已關閉 RTCM 資料解析 [掛載點：{mount_name}]")
              
     def get_result(self, mount_name: str) -> Optional[Dict]:
         """获取解析结果（兼容原接口）"""
@@ -142,7 +142,7 @@ class RTCM2ParserManager:
         with self.lock:
             for mount_name in list(self.parsers.keys()):
                 self.stop_parser(mount_name)
-            log_info("所有解析器已停止")
+            log_info("所有解析器皆已停止")
 
     # Web模式相关方法（兼容原接口）
     def acquire_parser(self, mount_name: str, push_callback: Optional[Callable[[Dict], None]] = None) -> Optional[Dict]:
@@ -161,12 +161,12 @@ class RTCM2ParserManager:
         with self.lock:
             # 第一步：清理前一个Web解析线程（如果存在）
             if self.current_web_mount and self.current_web_mount != mount_name:
-                log_info(f"检测到前一个Web解析线程 [挂载点: {self.current_web_mount}]，准备清理")
+                log_info(f"偵測到前一個 Web 解析執行緒 [掛載點：{self.current_web_mount}]，準備清理")
                 self._stop_web_parser_only(self.current_web_mount)
             
             # 第二步：如果当前挂载点已有Web解析线程，也要先停止
             if mount_name in self.web_parsers:
-                log_info(f"当前挂载点 [挂载点: {mount_name}] 已有Web解析线程，先停止")
+                log_info(f"目前掛載點已有 Web 解析執行緒，先行停止 [掛載點：{mount_name}]")
                 self._stop_web_parser_only(mount_name)
             
             # 第三步：启动新的Web解析线程
@@ -174,7 +174,7 @@ class RTCM2ParserManager:
             if success:
                 # 更新当前活跃的Web解析挂载点
                 self.current_web_mount = mount_name
-                log_info(f"Web解析线程启动成功，当前活跃挂载点: {mount_name}")
+                log_info(f"Web 解析執行緒啟動成功，目前作用中的掛載點：{mount_name}")
             
             return success
 
@@ -193,7 +193,7 @@ class RTCM2ParserManager:
             if self.current_web_mount == mount_name:
                 self.current_web_mount = None
             
-            log_info(f"已停止Web解析线程 [挂载点: {mount_name}]，STR修正线程不受影响")
+            log_info(f"已停止 Web 解析執行緒 [掛載點：{mount_name}]，STR 修正執行緒不受影響")
 
     def stop_realtime_parsing(self):
         """停止所有实时解析（Web模式）- 改进版：仅停止Web解析线程，保护STR修正线程"""
@@ -207,9 +207,9 @@ class RTCM2ParserManager:
             self.current_web_mount = None
             
             if web_mounts:
-                log_info(f"已停止所有Web解析线程 [挂载点: {', '.join(web_mounts)}]，STR修正线程继续运行")
+                log_info(f"已停止所有 Web 解析執行緒 [掛載點：{', '.join(web_mounts)}]，STR 修正執行緒繼續執行")
             else:
-                log_info("没有活跃的Web解析线程需要停止")
+                log_info("沒有作用中的 Web 解析執行緒需要停止")
 
     def update_parsing_heartbeat(self, mount_name: str):
         """更新解析心跳（兼容原接口，暂时无需实现）"""

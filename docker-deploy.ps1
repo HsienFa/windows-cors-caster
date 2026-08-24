@@ -122,15 +122,12 @@ function Build-ComposeCommand {
     $environment = $env:ENVIRONMENT
     if (-not $environment) { $environment = "development" }
     
-    $profiles = $env:PROFILES
-    if (-not $profiles) { $profiles = "dev" }
+    $profiles = $env:COMPOSE_PROFILES
     
     $composeFiles = @("-f", "docker-compose.yml")
     
     if ($environment -eq "production") {
         $composeFiles += @("-f", "docker-compose.prod.yml")
-    } else {
-        $composeFiles += @("-f", "docker-compose.override.yml")
     }
     
     $profileArgs = @()
@@ -205,29 +202,35 @@ function New-RequiredDirectories {
 
 # 创建环境文件
 function New-EnvironmentFile {
-    Write-Log "创建环境配置文件..." "Step"
-    
-    if (-not (Test-Path $ENV_FILE)) {
-        if (Test-Path $ENV_EXAMPLE) {
-            Copy-Item $ENV_EXAMPLE $ENV_FILE
-            Write-Log "已创建 .env 文件" "Success"
-        } else {
-            Write-Log ".env.example 文件不存在" "Error"
-            return
-        }
-    }
-    
-    # 更新环境变量
-    $content = Get-Content $ENV_FILE
+    Write-Log "安全建立本机环境配置..." "Step"
     $environment = $env:ENVIRONMENT
     if (-not $environment) { $environment = "development" }
-    
-    $content = $content -replace '^ENVIRONMENT=.*', "ENVIRONMENT=$environment"
-    $content = $content -replace '^PROJECT_NAME=.*', "PROJECT_NAME=$PROJECT_NAME"
-    $content = $content -replace '^TZ=.*', "TZ=Asia/Shanghai"
-    
-    Set-Content -Path $ENV_FILE -Value $content
-    Write-Log "环境配置文件更新完成" "Success"
+    $profiles = $env:COMPOSE_PROFILES
+    if ($null -eq $profiles) { $profiles = "" }
+
+    $scriptPath = Join-Path $SCRIPT_DIR "scripts\deployment_config.py"
+    $arguments = @(
+        $scriptPath, "prepare-env",
+        "--env-file", $ENV_FILE,
+        "--example", $ENV_EXAMPLE,
+        "--environment", $environment,
+        "--profiles", $profiles
+    )
+    if ($profiles -match "monitoring") {
+        $arguments += "--monitoring"
+    }
+
+    if (Get-Command py -ErrorAction SilentlyContinue) {
+        & py -3 @arguments
+    } elseif (Get-Command python -ErrorAction SilentlyContinue) {
+        & python @arguments
+    } else {
+        Write-Log "找不到 Python 3，無法安全建立 .env 認證資料" "Error"
+        exit 1
+    }
+    if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+    Import-EnvironmentVariables
+    Write-Log "本機認證資料已儲存在被 Git 忽略的 .env，不會顯示" "Success"
 }
 
 # 健康检查
@@ -259,14 +262,14 @@ function Show-ServiceInfo {
     Write-Host ""
     Write-Host "📡 NTRIP Caster 服务:" -ForegroundColor $Colors.Cyan
     Write-Host "   - NTRIP 端口: ntrip://${localIP}:2101" -ForegroundColor $Colors.White
-    Write-Host "   - Web 管理界面: http://${localIP}:5757" -ForegroundColor $Colors.White
+    Write-Host "   - Web 管理界面: http://127.0.0.1:5757" -ForegroundColor $Colors.White
     
-    $profiles = $env:PROFILES
-    if ($profiles -and ($profiles -match "monitoring" -or $profiles -match "full")) {
+    $profiles = $env:COMPOSE_PROFILES
+    if ($profiles -and $profiles -match "monitoring") {
         Write-Host ""
         Write-Host "📊 监控服务:" -ForegroundColor $Colors.Cyan
-        Write-Host "   - Prometheus: http://${localIP}:9090" -ForegroundColor $Colors.White
-        Write-Host "   - Grafana: http://${localIP}:3000 (admin/admin123)" -ForegroundColor $Colors.White
+        Write-Host "   - Prometheus: http://127.0.0.1:9090" -ForegroundColor $Colors.White
+        Write-Host "   - Grafana: http://127.0.0.1:3000 (credentials remain in local .env)" -ForegroundColor $Colors.White
     }
     
     $environment = $env:ENVIRONMENT
@@ -307,12 +310,12 @@ function Show-Help {
     Write-Host ""
     Write-Host "环境变量:" -ForegroundColor $Colors.Yellow
     Write-Host "  ENVIRONMENT     部署环境 (development|production)" -ForegroundColor $Colors.White
-    Write-Host "  PROFILES        服务配置文件 (dev|prod|monitoring|full)" -ForegroundColor $Colors.White
+    Write-Host "  COMPOSE_PROFILES  Optional profiles (nginx,monitoring,cache)" -ForegroundColor $Colors.White
     Write-Host ""
     Write-Host "示例:" -ForegroundColor $Colors.Yellow
     Write-Host "  .\docker-deploy.ps1 up -d" -ForegroundColor $Colors.White
     Write-Host "  `$env:ENVIRONMENT='production'; .\docker-deploy.ps1 up" -ForegroundColor $Colors.White
-    Write-Host "  `$env:PROFILES='monitoring'; .\docker-deploy.ps1 restart" -ForegroundColor $Colors.White
+    Write-Host "  `$env:COMPOSE_PROFILES='monitoring'; .\docker-deploy.ps1 up -d" -ForegroundColor $Colors.White
     Write-Host ""
 }
 
@@ -349,6 +352,7 @@ function Main {
         }
         "up" {
             Write-Log "启动服务..." "Step"
+            New-EnvironmentFile
             $exitCode = Invoke-ComposeCommand (@("up") + $Args)
             if ($exitCode -eq 0) {
                 Start-Sleep -Seconds 5
@@ -426,6 +430,7 @@ function Main {
         }
         "update" {
             Write-Log "更新服务..." "Step"
+            New-EnvironmentFile
             Invoke-ComposeCommand @("pull")
             Invoke-ComposeCommand @("up", "-d")
             Write-Log "服务更新完成" "Success"

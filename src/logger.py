@@ -2,7 +2,6 @@
 # -*- coding: utf-8 -*-
 
 
-import os
 import sys
 import logging
 from logging.handlers import RotatingFileHandler
@@ -61,7 +60,7 @@ class NTRIPLogger:
         """设置日志系统"""
         
         log_dir = Path(config.LOG_DIR)
-        log_dir.mkdir(exist_ok=True)
+        log_dir.mkdir(parents=True, exist_ok=True)
         
         
         formatter = logging.Formatter(
@@ -83,7 +82,7 @@ class NTRIPLogger:
         
         logger.handlers.clear()
         
-        file_path = os.path.join(config.LOG_DIR, filename)
+        file_path = Path(config.LOG_DIR) / filename
         file_handler = RotatingFileHandler(
             file_path,
             maxBytes=config.LOG_MAX_SIZE,
@@ -111,7 +110,7 @@ class NTRIPLogger:
         
         root_logger.handlers.clear()
         
-        main_file_path = os.path.join(config.LOG_DIR, config.LOG_FILES['main'])
+        main_file_path = Path(config.LOG_DIR) / config.LOG_FILES['main']
         main_handler = RotatingFileHandler(
             main_file_path,
             maxBytes=config.LOG_MAX_SIZE,
@@ -122,7 +121,7 @@ class NTRIPLogger:
         main_handler.setFormatter(formatter)
         root_logger.addHandler(main_handler)
         
-        error_file_path = os.path.join(config.LOG_DIR, config.LOG_FILES['errors'])
+        error_file_path = Path(config.LOG_DIR) / config.LOG_FILES['errors']
         error_handler = RotatingFileHandler(
             error_file_path,
             maxBytes=config.LOG_MAX_SIZE,
@@ -166,7 +165,8 @@ class NTRIPLogger:
         """
         # 过滤频繁的日志信息，避免前端刷屏
         filtered_keywords = [
-            '用户活动更新', 'MSM', '卫星', '推送数据', '客户端连接',
+            '使用者活動更新', '用户活动更新', 'MSM', '衛星', '卫星',
+            '推送資料', '推送数据', '用戶端連線', '客户端连接',
             'RTCM data', 'Performance:', 'Database', 'bytes for mount'
         ]
         
@@ -269,7 +269,7 @@ class NTRIPLogger:
         if details:
             message += f" - {details}"
         self.get_logger('main').info(message)
-        self._push_to_web(f"系统事件: {event}" + (f" - {details}" if details else ""), 'info')
+        self._push_to_web(f"系統事件：{event}" + (f" - {details}" if details else ""), 'info')
     
     def log_performance(self, metric, value, unit=''):
         """记录性能指标日志"""
@@ -440,4 +440,3 @@ def shutdown_logging():
 logger = get_logger('main')
 ntrip_logger = get_logger('ntrip')
 error_logger = get_logger('error')
-

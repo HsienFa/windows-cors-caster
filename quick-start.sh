@@ -74,6 +74,11 @@ check_dependencies() {
         log_error "Docker 服务未运行，请启动 Docker 服务"
         exit 1
     fi
+
+    if ! command -v python3 &> /dev/null; then
+        log_error "找不到 Python 3，無法安全建立本機 Docker 認證資料"
+        exit 1
+    fi
     
     log_success "系统依赖检查完成"
 }
@@ -81,19 +86,6 @@ check_dependencies() {
 # 初始化环境
 init_environment() {
     log_step "初始化环境配置..."
-    
-    # 创建 .env 文件
-    if [[ ! -f "$ENV_FILE" ]]; then
-        if [[ -f "$ENV_EXAMPLE" ]]; then
-            cp "$ENV_EXAMPLE" "$ENV_FILE"
-            log_success "已创建 .env 配置文件"
-        else
-            log_error ".env.example 文件不存在"
-            exit 1
-        fi
-    else
-        log_info ".env 文件已存在，跳过创建"
-    fi
     
     # 创建必要目录
     log_info "创建必要目录..."
@@ -106,8 +98,8 @@ init_environment() {
 select_deployment_mode() {
     echo
     log_step "选择部署模式:"
-    echo "1) 开发模式 (development) - 包含开发工具和调试功能"
-    echo "2) 生产模式 (production) - 优化性能，仅核心服务"
+    echo "1) 开发模式 (development) - 核心服务与本机监控"
+    echo "2) 生产模式 (production) - 仅核心服务"
     echo "3) 完整模式 (full) - 包含所有服务和监控"
     echo "4) 最小模式 (minimal) - 仅 NTRIP Caster 核心服务"
     echo
@@ -117,22 +109,22 @@ select_deployment_mode() {
         case $choice in
             1)
                 ENVIRONMENT="development"
-                PROFILES="dev,monitoring"
+                COMPOSE_PROFILES="monitoring"
                 break
                 ;;
             2)
                 ENVIRONMENT="production"
-                PROFILES="prod,monitoring"
+                COMPOSE_PROFILES=""
                 break
                 ;;
             3)
                 ENVIRONMENT="production"
-                PROFILES="full"
+                COMPOSE_PROFILES="nginx,monitoring,cache"
                 break
                 ;;
             4)
                 ENVIRONMENT="production"
-                PROFILES="minimal"
+                COMPOSE_PROFILES=""
                 break
                 ;;
             *)
@@ -141,27 +133,33 @@ select_deployment_mode() {
         esac
     done
     
-    # 更新 .env 文件
-    sed -i "s/^ENVIRONMENT=.*/ENVIRONMENT=$ENVIRONMENT/" "$ENV_FILE"
-    
-    log_success "已选择 $ENVIRONMENT 模式，配置文件: $PROFILES"
+    local credential_args=(
+        prepare-env
+        --env-file "$ENV_FILE"
+        --example "$ENV_EXAMPLE"
+        --environment "$ENVIRONMENT"
+        --profiles "$COMPOSE_PROFILES"
+    )
+    if [[ "$COMPOSE_PROFILES" == *"monitoring"* ]]; then
+        credential_args+=(--monitoring)
+    fi
+    python3 "$SCRIPT_DIR/scripts/deployment_config.py" "${credential_args[@]}"
+    chmod 600 "$ENV_FILE"
+
+    log_success "已選擇 $ENVIRONMENT 模式；本機認證資料只儲存在 .env"
 }
 
 # 构建和启动服务
 deploy_services() {
     log_step "构建和启动服务..."
     
-    # 拉取最新镜像
-    log_info "拉取 Docker 镜像..."
-    ENVIRONMENT="$ENVIRONMENT" PROFILES="$PROFILES" ./docker-deploy.sh pull
-    
     # 构建自定义镜像
     log_info "构建应用镜像..."
-    ENVIRONMENT="$ENVIRONMENT" PROFILES="$PROFILES" ./docker-deploy.sh build
+    ENVIRONMENT="$ENVIRONMENT" ./docker-deploy.sh build
     
     # 启动服务
     log_info "启动服务..."
-    ENVIRONMENT="$ENVIRONMENT" PROFILES="$PROFILES" ./docker-deploy.sh up -d
+    ENVIRONMENT="$ENVIRONMENT" ./docker-deploy.sh start
     
     # 等待服务启动
     log_info "等待服务启动..."
@@ -169,7 +167,7 @@ deploy_services() {
     
     # 健康检查
     log_info "执行健康检查..."
-    ENVIRONMENT="$ENVIRONMENT" PROFILES="$PROFILES" ./docker-deploy.sh health
+    ENVIRONMENT="$ENVIRONMENT" ./docker-deploy.sh health
     
     log_success "服务部署完成"
 }
@@ -179,7 +177,7 @@ show_service_info() {
     log_step "服务信息:"
     
     # 显示服务状态
-    ENVIRONMENT="$ENVIRONMENT" PROFILES="$PROFILES" ./docker-deploy.sh status
+    ENVIRONMENT="$ENVIRONMENT" ./docker-deploy.sh status
     
     echo
     log_step "服务端点:"
@@ -189,30 +187,13 @@ show_service_info() {
     
     echo "📡 NTRIP Caster 服务:"
     echo "   - NTRIP 端口: ntrip://$LOCAL_IP:2101"
-    echo "   - Web 管理界面: http://$LOCAL_IP:5757"
+    echo "   - Web 管理界面: http://127.0.0.1:5757"
     
-    if [[ "$PROFILES" == *"monitoring"* ]] || [[ "$PROFILES" == *"full"* ]]; then
+    if [[ "$COMPOSE_PROFILES" == *"monitoring"* ]]; then
         echo
         echo "📊 监控服务:"
-        echo "   - Prometheus: http://$LOCAL_IP:9090"
-        echo "   - Grafana: http://$LOCAL_IP:3000 (admin/admin123)"
-    fi
-    
-    if [[ "$ENVIRONMENT" == "development" ]]; then
-        echo
-        echo "🛠️ 开发工具:"
-        echo "   - Adminer (数据库管理): http://$LOCAL_IP:8081"
-        echo "   - Dozzle (日志查看): http://$LOCAL_IP:8082"
-        echo "   - cAdvisor (容器监控): http://$LOCAL_IP:8083"
-    fi
-    
-    if [[ -f "$ENV_FILE" ]]; then
-        NGINX_PORT=$(grep "^NGINX_HTTP_PORT=" "$ENV_FILE" | cut -d'=' -f2 || echo "80")
-        if [[ "$NGINX_PORT" != "80" ]]; then
-            echo
-            echo "🌐 Nginx 代理:"
-            echo "   - HTTP: http://$LOCAL_IP:$NGINX_PORT"
-        fi
+        echo "   - Prometheus: http://127.0.0.1:9090"
+        echo "   - Grafana: http://127.0.0.1:3000 (認證資料位於本機 .env，不會顯示)"
     fi
     
     echo
@@ -226,7 +207,7 @@ show_management_commands() {
     echo "查看日志:     ./docker-deploy.sh logs"
     echo "查看状态:     ./docker-deploy.sh status"
     echo "重启服务:     ./docker-deploy.sh restart"
-    echo "停止服务:     ./docker-deploy.sh down"
+    echo "停止服务:     ./docker-deploy.sh stop"
     echo "清理资源:     ./docker-deploy.sh clean"
     echo "健康检查:     ./docker-deploy.sh health"
     echo "备份数据:     ./docker-deploy.sh backup"

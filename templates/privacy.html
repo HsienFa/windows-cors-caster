@@ -1,0 +1,45 @@
+<!DOCTYPE html>
+<html lang="zh-Hant-TW">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>隱私權政策 - 2RTK Ntrip Caster</title>
+    <style>
+        body { margin: 0; background: #f4f6f8; color: #243447; font-family: Arial, sans-serif; line-height: 1.7; }
+        main { max-width: 860px; margin: 32px auto; padding: 32px; background: #fff; border-radius: 10px; box-shadow: 0 4px 18px rgba(0,0,0,.08); }
+        h1, h2 { color: #1f4f82; }
+        .draft { padding: 12px 16px; border-left: 4px solid #d97706; background: #fff7ed; }
+        nav { display: flex; gap: 16px; flex-wrap: wrap; margin-top: 28px; }
+        a { color: #1565c0; }
+    </style>
+</head>
+<body>
+<main>
+    <h1>隱私權政策初稿</h1>
+    <p class="draft">本頁未經律師審核，也不是法律意見。公開部署前，營運者必須填入自己的公司或營運者名稱、聯絡方式、資料保存期限、刪除程序及適用地區。</p>
+
+    <h2>本機資料處理</h2>
+    <p>本軟體可能在營運者控制的資料庫、記憶體及日誌中處理使用者名稱、雜湊密碼、掛載點、連線 IP、RTCM／STR 資訊、基站座標及系統狀態。實際營運者應限制存取並制定保存期限。</p>
+
+    <h2>Google Maps 模式</h2>
+    <p>當 <code>provider = google</code> 且有有效 Key 時，瀏覽器會直接連線至 Google 地圖服務。Google 可能取得 IP、HTTP referrer、裝置或瀏覽器資訊、地圖中心、縮放層級與顯示座標等必要請求資訊。</p>
+    <p>基站座標可能具有敏感性，管理員應先評估是否適合交由外部地圖服務處理。相關資料處理受 <a href="https://policies.google.com/privacy" target="_blank" rel="noopener noreferrer">Google Privacy Policy</a> 及 <a href="https://maps.google.com/help/terms_maps/" target="_blank" rel="noopener noreferrer">Google Maps／Google Earth Additional Terms of Service</a> 約束。</p>
+
+    <h2>OpenStreetMap 模式</h2>
+    <p>當 <code>provider = osm</code> 或 Google 無法使用時，瀏覽器會向 OpenStreetMap 圖磚服務提出請求，可能揭露 IP、瀏覽器標頭、referrer、圖磚座標及縮放層級。</p>
+
+    <h2>不傳送給地圖服務的資料</h2>
+    <p>NTRIP 帳密、管理員密碼、Flask secret、Authorization 標頭及工作階段資料不應傳送給 Google Maps 或 OpenStreetMap。Google 標記只使用基站名稱、掛載點、經緯度及線上狀態。</p>
+
+    <h2>原作者與其他外連</h2>
+    <p>目前軟體沒有主動將使用者、基站、帳密、日誌或使用統計回傳給原作者。作者網站及電子郵件是使用者自行點擊的連結；套件或映像下載則由管理員主動執行。</p>
+
+    <p>完整初稿請參閱專案根目錄的 PRIVACY-POLICY.md。</p>
+    <nav aria-label="政策頁面">
+        <a href="{{ url_for('terms_of_use') }}">使用條款</a>
+        <a href="{{ url_for('login') }}">返回登入</a>
+        <a href="{{ url_for('index') }}">返回管理介面</a>
+    </nav>
+</main>
+</body>
+</html>

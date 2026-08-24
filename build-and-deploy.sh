@@ -127,13 +127,17 @@ test_image() {
     log_step "测试Docker镜像..."
     
     local test_container="ntrip-test-$(date +%s)"
+    local test_admin_password
+    test_admin_password=$(python3 -c 'import secrets; print(secrets.token_urlsafe(24))')
     
     # 启动测试容器
     docker run -d \
         --name "$test_container" \
-        -p 12101:2101 \
-        -p 15757:5757 \
+        -p 127.0.0.1:12101:2101 \
+        -p 127.0.0.1:15757:5757 \
+        -e NTRIP_ADMIN_PASSWORD="$test_admin_password" \
         "${IMAGE_NAME}:${IMAGE_TAG}"
+    unset test_admin_password
     
     # 等待容器启动
     sleep 10
@@ -220,16 +224,22 @@ services:
     hostname: ntrip-caster
     restart: unless-stopped
     ports:
-      - "2101:2101"  # NTRIP服务端口
-      - "5757:5757"  # Web管理端口
+      - "\${NTRIP_PUBLISH_HOST:-0.0.0.0}:2101:2101"
+      - "\${WEB_PUBLISH_HOST:-127.0.0.1}:5757:5757"
     volumes:
       - ntrip-data:/app/data          # 数据持久化
       - ntrip-logs:/app/logs          # 日志持久化
       - ntrip-config:/app/config      # 配置文件
       - /etc/localtime:/etc/localtime:ro  # 时区同步
     environment:
-      - TZ=Asia/Shanghai
+      - TZ=\${TZ:-Asia/Taipei}
       - NTRIP_CONFIG_FILE=/app/config/config.ini
+      - NTRIP_LISTEN_HOST=0.0.0.0
+      - WEB_LISTEN_HOST=0.0.0.0
+      - NTRIP_ADMIN_USERNAME=\${NTRIP_ADMIN_USERNAME:-admin}
+      - NTRIP_ADMIN_PASSWORD=\${NTRIP_ADMIN_PASSWORD:-}
+      - MAP_PROVIDER=\${MAP_PROVIDER:-osm}
+      - GOOGLE_MAPS_API_KEY=\${GOOGLE_MAPS_API_KEY:-}
     networks:
       - ntrip-network
     healthcheck:
@@ -267,6 +277,9 @@ networks:
         - subnet: 172.20.0.0/16
 EOF
 
+    cp .env.example "${docs_dir}/.env.example"
+    cp scripts/deployment_config.py "${docs_dir}/deployment_config.py"
+
     # 生成部署脚本
     cat > "${docs_dir}/deploy.sh" << 'EOF'
 #!/bin/bash
@@ -276,24 +289,38 @@ set -e
 
 echo "开始部署NTRIP Caster..."
 
-# 检查Docker和docker-compose
+# 检查 Docker、Compose 与 Python
 if ! command -v docker &> /dev/null; then
     echo "错误: 未安装Docker"
     exit 1
 fi
 
-if ! command -v docker-compose &> /dev/null; then
-    echo "错误: 未安装docker-compose"
+if ! docker compose version &> /dev/null; then
+    echo "错误: 未安装 Docker Compose 插件"
     exit 1
 fi
 
+if ! command -v python3 &> /dev/null; then
+    echo "错误: 未安装 Python 3，无法安全建立本机认证资料"
+    exit 1
+fi
+
+python3 deployment_config.py prepare-env \
+    --env-file .env \
+    --example .env.example \
+    --environment production \
+    --profiles ""
+chmod 600 .env
+
+docker compose config --quiet
+
 # 拉取最新镜像
 echo "拉取最新镜像..."
-docker-compose pull
+docker compose pull
 
 # 启动服务
 echo "启动服务..."
-docker-compose up -d
+docker compose up -d
 
 # 等待服务启动
 echo "等待服务启动..."
@@ -301,17 +328,17 @@ sleep 30
 
 # 检查服务状态
 echo "检查服务状态..."
-docker-compose ps
+docker compose ps
 
 echo "部署完成!"
-echo "NTRIP服务地址: http://localhost:2101"
-echo "Web管理界面: http://localhost:5757"
-echo "默认管理员账号: admin/admin123"
+echo "NTRIP服务地址: ntrip://localhost:2101"
+echo "Web管理界面: http://127.0.0.1:5757"
+echo "管理员认证资料仅储存在本机 .env，不会显示"
 echo ""
 echo "常用命令:"
-echo "  查看日志: docker-compose logs -f"
-echo "  停止服务: docker-compose down"
-echo "  重启服务: docker-compose restart"
+echo "  查看日志: docker compose logs -f"
+echo "  停止服务: docker compose down"
+echo "  重启服务: docker compose restart"
 EOF
 
     chmod +x "${docs_dir}/deploy.sh"
@@ -322,7 +349,7 @@ EOF
 
 ## 快速部署
 
-1. 确保已安装Docker和docker-compose
+1. 确保已安装 Docker、Docker Compose 插件与 Python 3
 2. 运行部署脚本:
    \`\`\`bash
    ./deploy.sh
@@ -332,23 +359,24 @@ EOF
 
 1. 拉取镜像:
    \`\`\`bash
-   docker-compose pull
+   python3 deployment_config.py prepare-env --env-file .env --example .env.example --environment production --profiles ""
+   docker compose pull
    \`\`\`
 
 2. 启动服务:
    \`\`\`bash
-   docker-compose up -d
+   docker compose up -d
    \`\`\`
 
 ## 服务访问
 
-- NTRIP服务: http://localhost:2101
-- Web管理界面: http://localhost:5757
-- 默认管理员账号: admin/admin123
+- NTRIP 服务：TCP 2101，預設對外發布，必須設定防火牆
+- Web 管理介面：\`http://127.0.0.1:5757\`
+- 管理員認證資料：僅儲存在被 Git 忽略的 \`.env\`，不會輸出
 
 ## 配置说明
 
-配置文件位于容器内的 \`/app/config/config.ini\`，可以通过数据卷进行持久化。
+首次啟動會在 \`ntrip-config\` 卷內建立小寫 schema 的安全設定；不會複製公開範例。
 
 ## 数据持久化
 
@@ -360,19 +388,19 @@ EOF
 
 \`\`\`bash
 # 查看服务状态
-docker-compose ps
+docker compose ps
 
 # 查看日志
-docker-compose logs -f
+docker compose logs -f
 
 # 重启服务
-docker-compose restart
+docker compose restart
 
 # 停止服务
-docker-compose down
+docker compose down
 
 # 更新服务
-docker-compose pull && docker-compose up -d
+docker compose pull && docker compose up -d
 \`\`\`
 
 ## 故障排除
