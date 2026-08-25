@@ -163,23 +163,43 @@ class ConnectionManager:
                 log_warning(f"無法取得系統 TCP 連線狀態，略過殭屍連線清理：{inspection.error}")
                 return False
 
-            # 检查应用层连接状态
+            # 系統 TCP 快照只能作為輔助資訊。Windows 的 psutil 快照可能在
+            # accept() 後短暫漏掉仍有效的連線，因此不能只因 IP 不在快照中
+            # 就關閉應用程式仍持有的有效 socket。
             with self.mount_lock:
-                zombie_mounts = [
-                    mount_name
+                suspected_mounts = [
+                    (mount_name, mount_info)
                     for mount_name, mount_info in self.online_mounts.items()
                     if mount_info.ip_address not in inspection.remote_ips
                 ]
 
-            for mount_name in zombie_mounts:
-                mount_info = self.online_mounts.get(mount_name)
-                if mount_info:
+            cleaned_mounts = []
+            for mount_name, mount_info in suspected_mounts:
+                client_socket = mount_info.client_socket
+                socket_closed = client_socket is None
+                if client_socket is not None:
+                    try:
+                        socket_closed = client_socket.fileno() < 0
+                    except (OSError, ValueError):
+                        socket_closed = True
+
+                if socket_closed:
                     log_warning(f"偵測到殭屍連線：掛載點 {mount_name}，IP {mount_info.ip_address}")
                     log_info(f"清理殭屍連線：{mount_name}")
-                    self.remove_mount_connection(mount_name, "殭屍連線清理")
+                    if self.remove_mount_connection(
+                        mount_name,
+                        "殭屍連線清理",
+                        expected_socket=client_socket,
+                    ):
+                        cleaned_mounts.append(mount_name)
+                else:
+                    log_debug(
+                        f"系統 TCP 快照未列出掛載點 {mount_name}，"
+                        "但應用程式 socket 仍有效，略過關閉"
+                    )
 
-            if zombie_mounts:
-                log_info(f"已清理 {len(zombie_mounts)} 個殭屍連線")
+            if cleaned_mounts:
+                log_info(f"已清理 {len(cleaned_mounts)} 個殭屍連線")
             else:
                 log_debug("未发现僵尸连接")
 
@@ -188,13 +208,20 @@ class ConnectionManager:
             log_error(f"清理殭屍連線時發生例外，已安全略過：{e}", exc_info=True)
             return False
     
-    def add_mount_connection(self, mount_name, ip_address, user_agent="", protocol_version="1.0", client_socket=None):
+    def add_mount_connection(
+        self,
+        mount_name,
+        ip_address,
+        user_agent="",
+        protocol_version="1.0",
+        client_socket=None,
+        start_correction=True,
+    ):
         """添加挂载点连接上传端"""
         with self.mount_lock:
             if mount_name in self.online_mounts:
-                log_debug(f"挂载点 {mount_name} 仍在线程表中，可能是相同IP重复连接的清理过程")
-               
-                del self.online_mounts[mount_name]
+                log_warning(f"掛載點 {mount_name} 已存在，拒絕覆寫既有 socket")
+                return False, "Mount point is already connected"
             
             log_debug(f"开始创建挂载点连接 - 名称: {mount_name}, IP: {ip_address}, User-Agent: {user_agent}, 协议版本: {protocol_version}")
             
@@ -214,8 +241,9 @@ class ConnectionManager:
             # 生成初始STR表
             self._generate_initial_str(mount_name)
             
-            # 启动STR修正解析流程
-            self.start_str_correction(mount_name)
+            # SOURCE 握手可延後啟動 STR 修正，避免成功回覆被較慢的背景初始化阻塞。
+            if start_correction:
+                self.start_str_correction(mount_name)
             
             log_info(f"掛載點 {mount_name} 已上線，IP：{ip_address}，目前線上掛載點數量：{len(self.online_mounts)}")
             log_debug(f"挂载点 {mount_name} 连接成功，初始状态: {mount_info.status}, 连接时间: {mount_info.connect_datetime}")
@@ -224,14 +252,25 @@ class ConnectionManager:
             
             return True, "Mount point connected successfully"
     
-    def remove_mount_connection(self, mount_name, reason="主動中斷連線"):
+    def remove_mount_connection(
+        self,
+        mount_name,
+        reason="主動中斷連線",
+        expected_socket=None,
+        close_socket=True,
+    ):
         """移除挂载点连接（上传端断开）"""
         with self.mount_lock:
             if mount_name in self.online_mounts:
                 mount_info = self.online_mounts[mount_name]
-                
+
+                # 舊 handler 的延遲或重複清理不得移除快速重連後的新 socket。
+                if expected_socket is not None and mount_info.client_socket is not expected_socket:
+                    log_debug(f"略過掛載點 {mount_name} 的過期清理：socket 所有權已變更")
+                    return False
+
                 # 强制关闭socket
-                if mount_info.client_socket:
+                if close_socket and mount_info.client_socket:
                     try:
                         mount_info.client_socket.close()
                         log_info(f"已強制關閉掛載點 {mount_name} 的 socket 連線")

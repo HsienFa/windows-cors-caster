@@ -84,6 +84,9 @@ class NTRIPHandler:
         self.username = ""
         self.ntrip1_password = ""  
         self.current_method = "GET"  
+        self.mount_connection_established = False
+        self._cleanup_lock = threading.Lock()
+        self._cleaned_up = False
         
         self.client_socket.settimeout(config.SOCKET_TIMEOUT)
         
@@ -1058,29 +1061,6 @@ a=control:*
             
             self.mount = mount
              
-            if connection.get_connection_manager().is_mount_online(mount):
-                existing_mount = connection.get_connection_manager().get_mount_info(mount)
-                if existing_mount and existing_mount['ip_address'] != self.client_address[0]:
-                    
-                    message_key = f"mount_occupied_{mount}_{existing_mount['ip_address']}"
-                    if anti_spam_logger.should_log(message_key):
-                        suppressed = anti_spam_logger.get_suppressed_count(message_key)
-                        if suppressed > 0:
-                            logger.log_warning(f"掛載點 {mount} 已由 {existing_mount['ip_address']} 占用，拒絕來自 {self.client_address[0]} 的連線（已抑制 {suppressed} 則相似訊息）")
-                        else:
-                            logger.log_warning(f"掛載點 {mount} 已由 {existing_mount['ip_address']} 占用，拒絕來自 {self.client_address[0]} 的連線")
-                    self.send_error_response(409, f"Mount point {mount} is already online from {existing_mount['ip_address']}")
-                    
-                    try:
-                        self.client_socket.close()
-                    except:
-                        pass
-                    return
-                elif existing_mount and existing_mount['ip_address'] == self.client_address[0]:
-                    logger.log_warning(f"偵測到相同 IP（{self.client_address[0]}）的重複連線，可能為連線異常，允許重新連線")
-                    
-                    connection.get_connection_manager().remove_mount_connection(mount, "相同 IP 重複連線")
-            
             # 所有请求都必须通过完整的数据库验证，确保挂载点存在且密码正确
             auth_header = headers.get('authorization', '')
             auth_log_message = "已收到認證標頭" if auth_header else "未收到認證標頭"
@@ -1099,8 +1079,54 @@ a=control:*
                     pass
                 return
              
+            manager = connection.get_connection_manager()
             try:
-                success, message = connection.get_connection_manager().add_mount_connection(mount, self.client_address[0], getattr(self, 'user_agent', 'Unknown'), getattr(self, 'ntrip_version', '1.0'), self.client_socket)
+                # 掛載點替換、註冊與成功回覆必須同步完成。這可防止另一條
+                # 清理路徑在 ICY/HTTP 200 傳送前關閉剛註冊的來源 socket。
+                with manager.mount_lock:
+                    existing_mount = manager.online_mounts.get(mount)
+                    if existing_mount and existing_mount.ip_address != self.client_address[0]:
+                        existing_ip = existing_mount.ip_address
+                        message_key = f"mount_occupied_{mount}_{existing_ip}"
+                        if anti_spam_logger.should_log(message_key):
+                            suppressed = anti_spam_logger.get_suppressed_count(message_key)
+                            if suppressed > 0:
+                                logger.log_warning(f"掛載點 {mount} 已由 {existing_ip} 占用，拒絕來自 {self.client_address[0]} 的連線（已抑制 {suppressed} 則相似訊息）")
+                            else:
+                                logger.log_warning(f"掛載點 {mount} 已由 {existing_ip} 占用，拒絕來自 {self.client_address[0]} 的連線")
+                        self.send_error_response(409, f"Mount point {mount} is already online from {existing_ip}")
+                        return
+
+                    if existing_mount:
+                        logger.log_warning(f"偵測到相同 IP（{self.client_address[0]}）的重複連線，允許已驗證來源重新連線")
+                        manager.remove_mount_connection(
+                            mount,
+                            "相同 IP 重複連線",
+                            expected_socket=existing_mount.client_socket,
+                        )
+
+                    success, message = manager.add_mount_connection(
+                        mount,
+                        self.client_address[0],
+                        getattr(self, 'user_agent', 'Unknown'),
+                        getattr(self, 'ntrip_version', '1.0'),
+                        self.client_socket,
+                        start_correction=False,
+                    )
+                    if success:
+                        self.mount_connection_established = True
+                        try:
+                            self.send_upload_success_response()
+                        except Exception:
+                            manager.remove_mount_connection(
+                                mount,
+                                "上傳成功回覆失敗",
+                                expected_socket=self.client_socket,
+                                close_socket=False,
+                            )
+                            self.mount_connection_established = False
+                            raise
+
                 if not success:
                     logger.log_warning(f"掛載點 {mount} 的連線遭拒：{message}")
                     logger.log_info(f"連線拒絕詳細資料 - 掛載點：{mount}，IP：{self.client_address[0]}，原因：{message}")
@@ -1112,16 +1138,19 @@ a=control:*
                         pass
                     return
 
-                self.mount_connection_established = True
-                
                 if success:
                     logger.log_info(f"掛載點 {mount} 已成功新增至連線管理器：{message}")
                 else:
                     logger.log_warning(f"掛載點 {mount} 新增至連線管理器失敗：{message}")
             except Exception as e:
-                logger.log_error(f"將掛載點 {mount} 新增至連線管理器時發生例外：{e}", exc_info=True)
+                logger.log_error(f"將掛載點 {mount} 新增至連線管理器或傳送成功回覆時發生例外：{e}", exc_info=True)
+                self._cleanup()
+                return
 
-            self.send_upload_success_response()
+            try:
+                manager.start_str_correction(mount)
+            except Exception as correction_error:
+                logger.log_warning(f"啟動掛載點 {mount} 的 STR 修正失敗，RTCM 接收將繼續：{correction_error}")
             
             username_for_log = getattr(self, 'username', mount) if hasattr(self, 'username') else mount
             logger.log_mount_operation('upload_connected', mount, username_for_log)
@@ -1226,33 +1255,7 @@ a=control:*
         except Exception as e:
             logger.log_error(f"接收 RTCM 資料時發生例外：{e}", exc_info=True)
         finally:
-            
-            def delayed_cleanup():
-                """延迟清理函数"""
-                try:
-                    forwarder.remove_mount_buffer(mount)
-                except Exception as e:
-                    logger.log_warning(f"清理轉送器緩衝區失敗：{e}", 'ntrip')
-                
-                try:
-                    connection.get_connection_manager().remove_mount_connection(mount)
-                except Exception as e:
-                    log_warning(f"清理掛載點連線失敗：{e}")
-                
-
-                logger.log_mount_operation('disconnected', mount)
-                # 改为debug级别，避免频繁日志
-                log_debug(f"挂载点 {mount} 延迟清理完成")
-            
-            # 记录断开事件，改为warning级别以确保重要信息被记录
-            log_warning(f"掛載點 {mount} 的連線中斷，將於 1.5 秒後清理資料")
-            
-
-            cleanup_timer = threading.Timer(1.5, delayed_cleanup)
-            cleanup_timer.daemon = True  # 设置为守护线程
-            cleanup_timer.start()
-            
-
+            log_warning(f"掛載點 {mount} 的連線中斷，立即清理目前來源連線")
             self._cleanup()
     
     def _keep_connection_alive(self):
@@ -1366,15 +1369,13 @@ a=control:*
         if self.ntrip_version == "2.0":
             self._send_response(
                 "HTTP/1.1 200 OK",
-                additional_headers=["Connection: keep-alive"]
+                additional_headers=["Connection: keep-alive"],
+                raise_errors=True,
             )
         else:
             # NTRIP 1.0格式
-            try:
-                response = "ICY 200 OK\r\n\r\n"
-                self.client_socket.send(response.encode('utf-8'))
-            except Exception as e:
-                logger.log_error(f"傳送上傳成功回應失敗：{e}", exc_info=True)
+            response = "ICY 200 OK\r\n\r\n"
+            self.client_socket.sendall(response.encode('utf-8'))
     
     def send_download_success_response(self):
         """发送下载成功响应"""
@@ -1487,7 +1488,14 @@ a=control:*
         
         return "\r\n".join(headers) + "\r\n"
     
-    def _send_response(self, status_line, content_type=None, content=None, additional_headers=None):
+    def _send_response(
+        self,
+        status_line,
+        content_type=None,
+        content=None,
+        additional_headers=None,
+        raise_errors=False,
+    ):
         """发送标准化HTTP响应"""
         try:
             response = status_line + "\r\n"
@@ -1504,13 +1512,20 @@ a=control:*
             if content:
                 response += content
             
-            self.client_socket.send(response.encode('utf-8'))
+            self.client_socket.sendall(response.encode('utf-8'))
             
         except Exception as e:
             logger.log_error(f"傳送回應失敗：{e}", exc_info=True)
+            if raise_errors:
+                raise
     
     def _cleanup(self):
         """清理资源"""
+        with self._cleanup_lock:
+            if self._cleaned_up:
+                return
+            self._cleaned_up = True
+
         try:
             # print(f"\n>>> 连接清理开始 - IP: {self.client_address[0]}, 时间: {datetime.now().strftime('%H:%M:%S.%f')[:-3]}")
 
@@ -1520,9 +1535,19 @@ a=control:*
                     connection.remove_user_connection(self.username, self.client_address[0], self.mount)
                 else:  # 上传连接
                     # 只有真正成功建立的挂载点连接才在断开时移除
-                    if hasattr(self, 'mount_connection_established') and self.mount_connection_established:
+                    if self.mount_connection_established:
                         # print(f">>> 移除挂载点连接 - 挂载点: {self.mount}")
-                        connection.remove_mount_connection(self.mount)
+                        connection.get_connection_manager().remove_mount_connection(
+                            self.mount,
+                            expected_socket=self.client_socket,
+                            close_socket=False,
+                        )
+                        self.mount_connection_established = False
+                        try:
+                            forwarder.remove_mount_buffer(self.mount)
+                        except Exception as e:
+                            logger.log_warning(f"清理轉送器緩衝區失敗：{e}", 'ntrip')
+                        logger.log_mount_operation('disconnected', self.mount)
                     else:
                         # print(f">>> 跳过移除挂载点连接 - 挂载点: {self.mount} (连接未成功建立)")
                         pass
@@ -1530,6 +1555,10 @@ a=control:*
                 # print(f">>> 跳过连接移除 - username存在: {hasattr(self, 'username')}, mount存在: {hasattr(self, 'mount')}") 
                 pass
             
+            try:
+                self.client_socket.shutdown(socket.SHUT_RDWR)
+            except OSError:
+                pass
             self.client_socket.close()
             # print(f">>> 连接清理完成 - IP: {self.client_address[0]}")
         except Exception as e:
