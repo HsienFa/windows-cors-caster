@@ -78,6 +78,20 @@ class RingBuffer:
                         result.append((item['timestamp'], item['data']))
             
             return result
+
+    def get_from_index(self, start_index):
+        """取得指定寫入序號起的資料，避免相同時間戳造成遺漏。"""
+        with self.lock:
+            return [
+                (item['index'], item['timestamp'], item['data'])
+                for item in self.buffer
+                if item['index'] >= start_index
+            ]
+
+    def get_write_index(self):
+        """回傳下一筆資料將使用的寫入序號。"""
+        with self.lock:
+            return self._write_index
     
     def get_stats(self):
         """获取缓冲区统计信息"""
@@ -165,7 +179,17 @@ class SimpleDataForwarder:
                     
         logger.log_system_event('資料轉送器已停止')
     
-    def add_client(self, client_socket, user, mount, agent, addr, protocol_version, connection_id=None):
+    def add_client(
+        self,
+        client_socket,
+        user,
+        mount,
+        agent,
+        addr,
+        protocol_version,
+        connection_id=None,
+        active=True,
+    ):
         """添加客户端连接（同步方式）"""
         try:
             # 启用TCP Keep-Alive
@@ -174,6 +198,10 @@ class SimpleDataForwarder:
             client_socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
 
             current_time = time.time()
+            with self.buffer_lock:
+                mount_buffer = self.mount_buffers.get(mount)
+                next_buffer_index = mount_buffer.get_write_index() if mount_buffer else 0
+
             client_info = {
                 'socket': client_socket,
                 'user': user,
@@ -185,9 +213,12 @@ class SimpleDataForwarder:
                 'connected_at': current_time,
                 'last_seen': current_time,
                 'last_sent_timestamp': current_time,  
+                'next_buffer_index': next_buffer_index,
                 'bytes_sent': 0,
                 'messages_sent': 0,
-                'send_errors': 0
+                'send_errors': 0,
+                'active': active,
+                'removed': False,
             }
             
             with self.client_lock:
@@ -204,9 +235,15 @@ class SimpleDataForwarder:
                 self.clients[mount].append(client_info)
                 
                 self.stats['total_clients'] += 1
-                self.stats['active_clients'] = sum(len(clients) for clients in self.clients.values())
+                self.stats['active_clients'] = sum(
+                    1
+                    for clients in self.clients.values()
+                    for client in clients
+                    if client.get('active', True) and not client.get('removed', False)
+                )
             
-            logger.log_client_connect(user, mount, addr[0], protocol_version)
+            if active:
+                logger.log_client_connect(user, mount, addr[0], protocol_version)
             return client_info
             
         except Exception as e:
@@ -216,6 +253,36 @@ class SimpleDataForwarder:
             except:
                 pass
             raise
+
+    def activate_client(self, client_info):
+        """在成功回覆完成後，才將下載用戶端加入 RTCM 廣播。"""
+        with self.client_lock:
+            mount = client_info['mount']
+            registered = any(
+                candidate is client_info
+                for candidate in self.clients.get(mount, [])
+            )
+            if not registered or client_info.get('removed', False):
+                raise RuntimeError("Client is no longer registered")
+
+            if client_info.get('active', False):
+                return True
+
+            client_info['active'] = True
+            self.stats['active_clients'] = sum(
+                1
+                for clients in self.clients.values()
+                for client in clients
+                if client.get('active', True) and not client.get('removed', False)
+            )
+
+        logger.log_client_connect(
+            client_info['user'],
+            client_info['mount'],
+            client_info['addr'][0],
+            client_info['protocol_version'],
+        )
+        return True
     
     def _enable_keepalive(self, client_socket):
         """TCP Keep-Alive"""
@@ -249,35 +316,58 @@ class SimpleDataForwarder:
     
     def remove_client(self, client_info):
         """移除客户端连接"""
+        was_active = False
+        removed = False
+        connection_removed = True
         try:
-            self._close_client(client_info)
-            
             with self.client_lock:
-                
                 mount = client_info['mount']
-                if mount in self.clients and client_info in self.clients[mount]:
-                    self.clients[mount].remove(client_info)
-                    
+                mount_clients = self.clients.get(mount, [])
+                for index, candidate in enumerate(mount_clients):
+                    if candidate is client_info:
+                        was_active = candidate.get('active', True)
+                        candidate['active'] = False
+                        candidate['removed'] = True
+                        del mount_clients[index]
+                        removed = True
+                        break
+
+                if removed:
                     if not self.clients[mount]:
                         del self.clients[mount]
-                
-                self.stats['active_clients'] = sum(len(clients) for clients in self.clients.values())
-                self.stats['disconnected_clients'] += 1
-            
-            connection.remove_user_connection(
-                client_info['user'], 
-                client_info['addr'][0], 
-                client_info['mount']
+                    self.stats['disconnected_clients'] += 1
+
+                self.stats['active_clients'] = sum(
+                    1
+                    for clients in self.clients.values()
+                    for client in clients
+                    if client.get('active', True) and not client.get('removed', False)
+                )
+
+            if not removed:
+                return False
+
+            connection_id = client_info.get('connection_id')
+            connection_removed = connection.remove_user_connection(
+                client_info['user'],
+                connection_id=connection_id,
+                mount_name=None if connection_id else client_info['mount'],
             )
-            
-            logger.log_client_disconnect(
-                client_info['user'], 
-                client_info['mount'], 
-                client_info['addr'][0]
-            )
-            
+
+            if was_active:
+                logger.log_client_disconnect(
+                    client_info['user'],
+                    client_info['mount'],
+                    client_info['addr'][0]
+                )
         except Exception as e:
+            connection_removed = False
             logger.log_error(f"移除用戶端失敗：{e}", exc_info=True)
+        finally:
+            if removed:
+                self._close_client(client_info)
+
+        return removed and connection_removed
     
     def _close_client(self, client_info):
         """关闭客户端连接"""
@@ -340,7 +430,11 @@ class SimpleDataForwarder:
         for mount_name, buffer in mount_items:
             with self.client_lock:
                 if mount_name in self.clients:
-                    clients = self.clients[mount_name][:]
+                    clients = [
+                        client
+                        for client in self.clients[mount_name]
+                        if client.get('active', True) and not client.get('removed', False)
+                    ]
                     self._send_data_to_clients(clients, buffer, mount_name)
     
     def _send_data_to_clients(self, clients, buffer, mount_name):
@@ -362,8 +456,8 @@ class SimpleDataForwarder:
         """发送数据到单个客户端"""
         try:
             
-            last_sent_timestamp = client_info['last_sent_timestamp']
-            new_data = buffer.get_since(last_sent_timestamp)
+            new_items = buffer.get_from_index(client_info.get('next_buffer_index', 0))
+            new_data = [(timestamp, data) for _, timestamp, data in new_items]
             
             if new_data:
                 
@@ -374,6 +468,7 @@ class SimpleDataForwarder:
                     current_time = time.time()
                     client_info['last_seen'] = current_time
                     client_info['last_sent_timestamp'] = new_data[-1][0]
+                    client_info['next_buffer_index'] = new_items[-1][0] + 1
                     client_info['bytes_sent'] += bytes_sent
                     client_info['messages_sent'] += len(new_data)
                     
@@ -430,16 +525,34 @@ class SimpleDataForwarder:
             return {
                 'forwarder': self.stats.copy(),
                 'buffers': buffer_stats,
-                'clients_by_mount': {mount: len(clients) for mount, clients in self.clients.items()}
+                'clients_by_mount': {
+                    mount: sum(
+                        1
+                        for client in clients
+                        if client.get('active', True) and not client.get('removed', False)
+                    )
+                    for mount, clients in self.clients.items()
+                }
             }
     
     def get_client_info(self, mount=None):
         """获取客户端信息"""
         with self.client_lock:
             if mount:
-                return self.clients.get(mount, [])
+                return [
+                    client
+                    for client in self.clients.get(mount, [])
+                    if client.get('active', True) and not client.get('removed', False)
+                ]
             else:
-                return dict(self.clients)
+                return {
+                    mount_name: [
+                        client
+                        for client in clients
+                        if client.get('active', True) and not client.get('removed', False)
+                    ]
+                    for mount_name, clients in self.clients.items()
+                }
     
 
     
@@ -575,10 +688,28 @@ def stop_forwarder():
     forwarder.stop()
 
 
-def add_client(client_socket, user, mount, agent, addr, protocol_version, connection_id=None):
+def add_client(
+    client_socket,
+    user,
+    mount,
+    agent,
+    addr,
+    protocol_version,
+    connection_id=None,
+    active=True,
+):
     """同步添加客户端（兼容原接口）"""
     try:
-        return forwarder.add_client(client_socket, user, mount, agent, addr, protocol_version, connection_id)
+        return forwarder.add_client(
+            client_socket,
+            user,
+            mount,
+            agent,
+            addr,
+            protocol_version,
+            connection_id,
+            active,
+        )
     except Exception as e:
         logger.log_error(f"新增用戶端逾時：{e}", 'ntrip')
         raise
@@ -586,6 +717,10 @@ def add_client(client_socket, user, mount, agent, addr, protocol_version, connec
 def remove_client(client_info):
     """移除客户端"""
     return forwarder.remove_client(client_info)
+
+def activate_client(client_info):
+    """啟用已完成成功握手的下載用戶端。"""
+    return forwarder.activate_client(client_info)
 
 def upload_data(mount, data_chunk):
     """上传数据"""

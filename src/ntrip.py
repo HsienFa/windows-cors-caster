@@ -87,6 +87,9 @@ class NTRIPHandler:
         self.mount_connection_established = False
         self._cleanup_lock = threading.Lock()
         self._cleaned_up = False
+        self._download_cleanup_lock = threading.Lock()
+        self._download_cleaned_up = False
+        self.download_connection_id = None
         
         self.client_socket.settimeout(config.SOCKET_TIMEOUT)
         
@@ -1184,31 +1187,43 @@ a=control:*
                 self.send_error_response(404, "Mount point not found")
                 return
             
-            # 添加到连接管理器
-            connection_id = connection.add_user_connection(self.username, mount, self.client_address[0])
-            
-            # 添加客户端到转发器
             try:
-                self.client_info = forwarder.add_client(self.client_socket, self.username, mount,
-                                                       self.user_agent, self.client_address, 
-                                                       self.ntrip_version, connection_id)
+                self.download_connection_id = connection.add_user_connection(
+                    self.username,
+                    mount,
+                    self.client_address[0],
+                    self.user_agent,
+                    self.ntrip_version,
+                )
+                if not self.download_connection_id:
+                    raise RuntimeError("Failed to register user connection")
+
+                # 先註冊為 pending；完整成功回覆送出前不得接收 RTCM。
+                self.client_info = forwarder.add_client(
+                    self.client_socket,
+                    self.username,
+                    mount,
+                    self.user_agent,
+                    self.client_address,
+                    self.ntrip_version,
+                    self.download_connection_id,
+                    active=False,
+                )
                 if not self.client_info:
-                    self.send_error_response(500, "Failed to add client")
-                    return
+                    raise RuntimeError("Failed to add client")
+
+                self.send_download_success_response()
+                forwarder.activate_client(self.client_info)
             except Exception as e:
-                logger.log_error(f"新增用戶端失敗：{e}", exc_info=True)
-                self.send_error_response(500, "Failed to add client")
+                logger.log_error(f"建立下載連線失敗：{e}", exc_info=True)
+                self._cleanup_download_connection()
                 return
-            
-            self.send_download_success_response()
-            
-            logger.log_client_connect(self.username, mount, self.client_address[0], self.user_agent)
-            
+
             self._keep_connection_alive()
         
         except Exception as e:
             logger.log_error(f"處理下載請求時發生例外：{e}", exc_info=True)
-            self.send_error_response(500, "Internal Server Error")
+            self._cleanup_download_connection()
     
     def handle_http_get(self, path, headers):
         """处理普通HTTP GET请求"""
@@ -1278,10 +1293,45 @@ a=control:*
             
             pass
         finally:
-            
-            if hasattr(self, 'client_info') and self.client_info:
-                forwarder.remove_client(self.client_info)
-                logger.log_client_disconnect(self.username, self.mount, self.client_address[0])
+            self._cleanup_download_connection()
+
+    def _cleanup_download_connection(self):
+        """同步且可重複執行地回滾下載端的所有註冊與 socket。"""
+        with self._download_cleanup_lock:
+            if self._download_cleaned_up:
+                return
+            self._download_cleaned_up = True
+
+        client_info = getattr(self, 'client_info', None)
+        connection_id = self.download_connection_id
+        forwarder_cleaned = False
+
+        if client_info is not None:
+            try:
+                forwarder_cleaned = forwarder.remove_client(client_info)
+            except Exception as e:
+                logger.log_warning(f"從轉送器移除下載用戶端失敗：{e}", 'ntrip')
+
+        if connection_id and not forwarder_cleaned:
+            try:
+                connection.remove_user_connection(
+                    self.username,
+                    connection_id=connection_id,
+                )
+            except Exception as e:
+                logger.log_warning(f"移除下載使用者連線失敗：{e}", 'ntrip')
+
+        self.client_info = None
+        self.download_connection_id = None
+
+        try:
+            self.client_socket.shutdown(socket.SHUT_RDWR)
+        except OSError:
+            pass
+        try:
+            self.client_socket.close()
+        except OSError:
+            pass
     
     def _send_mount_list(self):
         """发送挂载点列表"""
@@ -1383,16 +1433,14 @@ a=control:*
             self._send_response(
                 "HTTP/1.1 200 OK",
                 content_type="application/octet-stream",
-                additional_headers=["Connection: keep-alive"]
+                additional_headers=["Connection: keep-alive"],
+                raise_errors=True,
             )
         else:
             # NTRIP 1.0格式 - 强制保持连接，忽略客户端的Connection: close
-            try:
-                response = "ICY 200 OK\r\nConnection: keep-alive\r\n\r\n"
-                self.client_socket.send(response.encode('utf-8'))
-                logger.log_debug(f"NTRIP 1.0下载响应已发送，保持长连接: {self.client_address}", 'ntrip')
-            except Exception as e:
-                logger.log_error(f"傳送下載成功回應失敗：{e}", exc_info=True)
+            response = "ICY 200 OK\r\nConnection: keep-alive\r\n\r\n"
+            self.client_socket.sendall(response.encode('utf-8'))
+            logger.log_debug(f"NTRIP 1.0下载响应已发送，保持长连接: {self.client_address}", 'ntrip')
     
     def send_auth_challenge(self, message="Authentication required", auth_type="both"):
         """发送认证挑战"""
@@ -1529,11 +1577,12 @@ a=control:*
         try:
             # print(f"\n>>> 连接清理开始 - IP: {self.client_address[0]}, 时间: {datetime.now().strftime('%H:%M:%S.%f')[:-3]}")
 
+            if self._download_cleaned_up or self.download_connection_id or getattr(self, 'client_info', None):
+                self._cleanup_download_connection()
+                return
+
             if hasattr(self, 'username') and hasattr(self, 'mount'):
-                if hasattr(self, 'client_info'):  # 下载连接
-                    # print(f">>> 移除用户连接 - 用户: {self.username}, 挂载点: {self.mount}")
-                    connection.remove_user_connection(self.username, self.client_address[0], self.mount)
-                else:  # 上传连接
+                if not hasattr(self, 'client_info'):  # 上传连接
                     # 只有真正成功建立的挂载点连接才在断开时移除
                     if self.mount_connection_established:
                         # print(f">>> 移除挂载点连接 - 挂载点: {self.mount}")

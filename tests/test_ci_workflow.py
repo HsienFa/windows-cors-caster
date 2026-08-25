@@ -61,6 +61,10 @@ class GitHubActionsWorkflowTests(unittest.TestCase):
             'python -m unittest discover -s tests -p "test_ntrip_upload_lifecycle.py"',
             windows_job,
         )
+        self.assertIn(
+            'python -m unittest discover -s tests -p "test_ntrip_download_lifecycle.py"',
+            windows_job,
+        )
         self.assertNotIn("cmd.exe", ubuntu_job.lower())
         self.assertNotIn("continue-on-error", self.lower_source)
         self.assertNotRegex(self.lower_source, r"(?m)\|\|\s*(?:true|exit\s+0)\b")
@@ -83,6 +87,7 @@ class GitHubActionsWorkflowTests(unittest.TestCase):
             "test_deployment_and_policy.py",
             "test_ci_workflow.py",
             "test_ntrip_upload_lifecycle.py",
+            "test_ntrip_download_lifecycle.py",
         )
         for test_file in required_test_files:
             self.assertIn(test_file, self.source)
