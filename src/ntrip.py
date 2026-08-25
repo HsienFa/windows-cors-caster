@@ -164,7 +164,7 @@ class NTRIPHandler:
                 self.send_error_response(400, "Bad Request: Empty request")
                 return
             
-            self._determine_ntrip_version(headers, request_line)
+            self._determine_ntrip_version(headers, request_line, method, path)
             
             is_valid, error_msg = self._is_valid_request(method, path, headers)
             if not is_valid:
@@ -354,7 +354,7 @@ class NTRIPHandler:
                 headers[key.strip().lower()] = value.strip()
         return headers
     
-    def _determine_ntrip_version(self, headers, request_line):
+    def _determine_ntrip_version(self, headers, request_line, method=None, path=None):
         """确定NTRIP协议类型判断"""
         
         if request_line.startswith(('SOURCE ', 'ADMIN ')):
@@ -401,9 +401,34 @@ class NTRIPHandler:
             return
         else:
             protocol_type = "unknown"
-        
-        
-        if request_line.startswith(('POST ', 'GET ')) and 'HTTP/' in request_line:
+
+        request_parts = request_line.split()
+        if method is None and request_parts:
+            method = request_parts[0]
+        if path is None and len(request_parts) >= 2:
+            path = request_parts[1]
+        method = (method or '').upper()
+
+        # 明確宣告 NTRIP 2.0 時永遠優先，且後續仍要求 Host。
+        declared_version = headers.get('ntrip-version', '').lower()
+        if 'ntrip/2.0' in declared_version:
+            self.ntrip_version = "2.0"
+            self.protocol_type = "ntrip2_0"
+            log_debug(f"检测到NTRIP 2.0协议: {self.client_address}")
+            return
+
+        if self._is_legacy_ntrip_download_request(
+            method,
+            path,
+            headers,
+            request_line,
+        ):
+            self.ntrip_version = "1.0"
+            self.protocol_type = "ntrip1_0_http"
+            log_debug(f"检测到旧式NTRIP 1.0 HTTP下载请求: {self.client_address}")
+            return
+
+        if method in ('POST', 'GET') and 'HTTP/' in request_line:
             user_agent = headers.get('user-agent', '').lower()
             
            
@@ -437,50 +462,79 @@ class NTRIPHandler:
                 self.protocol_type = "ntrip2_0"
                 log_debug(f"基于路径检测NTRIP 2.0: {self.client_address}")
                 return
-        
-        # 检查Ntrip-Version头部字段（NTRIP 2.0特有）
-        ntrip_version = headers.get('ntrip-version', '')
-        if 'NTRIP/2.0' in ntrip_version:
-            self.ntrip_version = "2.0"
-            self.protocol_type = "ntrip2_0"
-            log_debug(f"检测到NTRIP 2.0协议: {self.client_address}")
-        elif protocol_type == "http":
-            # HTTP请求但没有Ntrip-Version头，判断是否需要协议降级
-            if self._should_downgrade_protocol(headers):
-                self.ntrip_version = "1.0"
-                self.protocol_type = "ntrip1_0"
-                log_debug(f"协议降级到NTRIP 1.0: {self.client_address}")
+
+        if protocol_type == "http":
+            user_agent = headers.get('user-agent', '').lower()
+            if any(keyword in user_agent for keyword in ['ntrip', 'rtk', 'gnss']):
+                self.ntrip_version = "2.0"
+                self.protocol_type = "ntrip2_0"
+                log_debug(f"基于User-Agent检测NTRIP 2.0: {self.client_address}")
             else:
-                
-                user_agent = headers.get('user-agent', '').lower()
-                if any(keyword in user_agent for keyword in ['ntrip', 'rtk', 'gnss']):
-                    self.ntrip_version = "2.0"
-                    self.protocol_type = "ntrip2_0"
-                    log_debug(f"基于User-Agent检测NTRIP 2.0: {self.client_address}")
-                else:
-                    self.ntrip_version = "2.0"
-                    self.protocol_type = "http"
-                    log_debug(f"使用HTTP协议: {self.client_address}")
+                self.ntrip_version = "2.0"
+                self.protocol_type = "http"
+                log_debug(f"使用HTTP协议: {self.client_address}")
         else:
             # 其他情况默认为NTRIP 1.0
             self.ntrip_version = "1.0"
             self.protocol_type = "ntrip1_0"
             log_debug(f"默认使用NTRIP 1.0: {self.client_address}")
-    
-    def _should_downgrade_protocol(self, headers):
-        """判断是否应该降级协议到NTRIP 1.0"""
-        
+
+    def _is_legacy_ntrip_download_request(self, method, path, headers, request_line):
+        """只相容可辨識且未宣告 2.0 的舊式 NTRIP GET 請求。"""
+        if method != 'GET' or 'host' in headers:
+            return False
+
+        if 'ntrip/2.0' in headers.get('ntrip-version', '').lower():
+            return False
+
         user_agent = headers.get('user-agent', '').lower()
-        old_clients = ['ntrip', 'rtk', 'gnss', 'leica', 'trimble']
-        
-        for client in old_clients:
-            if client in user_agent and '2.0' not in user_agent:
-                return True
-        
-        required_headers = ['connection', 'host']
-        missing_headers = [h for h in required_headers if h not in headers]
-        
-        return len(missing_headers) > 0
+        if not any(marker in user_agent for marker in ('ntrip', 'landstar')):
+            return False
+        if self._user_agent_declares_ntrip_2(user_agent):
+            return False
+
+        parts = request_line.split()
+        if len(parts) != 3:
+            return False
+        raw_method, raw_path, raw_protocol = parts
+        if raw_method.upper() != 'GET' or raw_path != path:
+            return False
+        if raw_protocol.upper() not in ('HTTP/1.0', 'HTTP/1.1'):
+            return False
+
+        return self._is_safe_ntrip_download_path(path)
+
+    @staticmethod
+    def _user_agent_declares_ntrip_2(user_agent):
+        """只辨識協定標記，不把 LandStar 應用程式版本誤當成 NTRIP 2.0。"""
+        normalized = ' '.join(user_agent.lower().split())
+        return any(
+            marker in normalized
+            for marker in ('ntrip/2.0', 'ntrip 2.0', 'ntrip v2.0')
+        )
+
+    @staticmethod
+    def _is_safe_ntrip_download_path(path):
+        """限制相容模式為 Sourcetable 根路徑或單一安全掛載點。"""
+        if path == '/':
+            return True
+        if not path or not path.startswith('/') or path.startswith('//'):
+            return False
+
+        mount_name = path[1:]
+        if not mount_name or len(mount_name) > 255:
+            return False
+        if mount_name in ('.', '..') or '..' in mount_name:
+            return False
+        if any(character in mount_name for character in ('/', '\\', '?', '#', '%')):
+            return False
+        if any(character.isspace() or ord(character) < 32 for character in mount_name):
+            return False
+
+        return all(
+            character.isalnum() or character in ('-', '_', '.', '~')
+            for character in mount_name
+        )
     
     def _is_valid_request(self, method, path, headers):
         """验证请求的有效性，"""

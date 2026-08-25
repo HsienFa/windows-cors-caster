@@ -1,5 +1,6 @@
 """NTRIP download handshake and RTCM forwarding lifecycle regressions."""
 
+import base64
 import os
 import socket
 import sys
@@ -76,8 +77,9 @@ finally:
 
 
 class ControlledSocket:
-    def __init__(self, fail_handshake=False):
+    def __init__(self, fail_handshake=False, request_data=b""):
         self.fail_handshake = fail_handshake
+        self.request_data = request_data
         self.handshake_started = threading.Event()
         self.release_handshake = threading.Event()
         self.writes = []
@@ -94,6 +96,11 @@ class ControlledSocket:
         if self.closed:
             raise OSError("socket closed")
         return 0
+
+    def recv(self, size):
+        data = self.request_data
+        self.request_data = b""
+        return data
 
     def send(self, data):
         raise AssertionError("download responses and RTCM must use sendall")
@@ -138,6 +145,29 @@ class NtripDownloadLifecycleTests(unittest.TestCase):
 
         handler.verify_user = mock.Mock(side_effect=verify_user)
         return handler
+
+    @staticmethod
+    def _basic_header():
+        credential = ":".join(("rover-user", "test-credential"))
+        encoded = base64.b64encode(credential.encode("utf-8")).decode("ascii")
+        return f"Basic {encoded}", encoded
+
+    def _request_handler(self, request_text, authentication_valid=True):
+        client_socket = ControlledSocket(request_data=request_text.encode("ascii"))
+        client_socket.release_handshake.set()
+        database = mock.Mock()
+        database.check_mount_exists_in_db.return_value = True
+        database.verify_download_user.return_value = (
+            authentication_valid,
+            "verified" if authentication_valid else "invalid credentials",
+        )
+        handler = ntrip.NTRIPHandler(
+            client_socket,
+            ("127.0.0.1", 33002),
+            database,
+        )
+        handler._keep_connection_alive = mock.Mock()
+        return handler, client_socket, database
 
     def _patch_lifecycle(self, add_side_effect=None, activate_side_effect=None):
         add_client = self.data_forwarder.add_client
@@ -325,6 +355,258 @@ class NtripDownloadLifecycleTests(unittest.TestCase):
 
         self.assertNotIn("TEST", self.data_forwarder.clients)
         self.assertNotIn("test-rover", self.manager.online_users)
+
+    def test_landstar_http_11_without_host_authenticates_as_ntrip_1(self):
+        auth_header, encoded = self._basic_header()
+        request = (
+            "GET /base HTTP/1.1\r\n"
+            "User-Agent: NTRIP CHC LandStar/8.3.0.20260616\r\n"
+            f"Authorization: {auth_header}\r\n"
+            "\r\n"
+        )
+        handler, client_socket, database = self._request_handler(request)
+        logged_messages = []
+
+        patches = self._patch_lifecycle()
+        for patcher in patches:
+            patcher.start()
+            self.addCleanup(patcher.stop)
+
+        with (
+            mock.patch.object(ntrip.connection, "get_user_connection_count", return_value=0),
+            mock.patch.object(
+                ntrip,
+                "log_debug",
+                side_effect=lambda message, *args, **kwargs: logged_messages.append(str(message)),
+            ),
+            mock.patch.object(
+                ntrip,
+                "log_info",
+                side_effect=lambda message, *args, **kwargs: logged_messages.append(str(message)),
+            ),
+        ):
+            handler.handle_request()
+
+        self.assertEqual(handler.ntrip_version, "1.0")
+        self.assertEqual(handler.protocol_type, "ntrip1_0_http")
+        database.verify_download_user.assert_called_once()
+        verification_args = database.verify_download_user.call_args.args
+        self.assertEqual(verification_args[0], "base")
+        self.assertEqual(verification_args[1], "rover-user")
+        self.assertEqual(len(self.data_forwarder.get_client_info("base")), 1)
+
+        rtcm = b"\xd3\x00\x03\x04\x05\x06"
+        self.data_forwarder.create_mount_buffer("base")
+        self.data_forwarder.mount_buffers["base"].append(rtcm)
+        self.data_forwarder._broadcast_data()
+        self.assertTrue(client_socket.writes[0].startswith(b"ICY 200 OK\r\n"))
+        self.assertEqual(client_socket.writes[1], rtcm)
+
+        combined_logs = "\n".join(logged_messages)
+        self.assertNotIn(encoded, combined_logs)
+        self.assertNotIn("Authorization: Basic", combined_logs)
+        self.assertIn("已收到認證標頭", combined_logs)
+        handler._cleanup_download_connection()
+
+    def test_landstar_invalid_basic_authentication_is_rejected(self):
+        auth_header, _ = self._basic_header()
+        request = (
+            "GET /base HTTP/1.1\r\n"
+            "User-Agent: NTRIP CHC LandStar/8.3.0.20260616\r\n"
+            f"Authorization: {auth_header}\r\n"
+            "\r\n"
+        )
+        handler, client_socket, database = self._request_handler(
+            request,
+            authentication_valid=False,
+        )
+        handler.send_auth_challenge = mock.Mock()
+
+        with mock.patch.object(ntrip.connection, "get_user_connection_count", return_value=0):
+            handler.handle_request()
+
+        self.assertEqual(handler.protocol_type, "ntrip1_0_http")
+        database.verify_download_user.assert_called_once()
+        handler.send_auth_challenge.assert_called_once()
+        handler._keep_connection_alive.assert_not_called()
+        self.assertEqual(self.data_forwarder.get_client_info("base"), [])
+        client_socket.close()
+
+    def test_landstar_application_version_2_0_is_not_a_protocol_declaration(self):
+        handler = ntrip.NTRIPHandler(
+            ControlledSocket(),
+            ("127.0.0.1", 33005),
+            mock.Mock(),
+        )
+        headers = {"user-agent": "NTRIP CHC LandStar/8.2.0"}
+
+        handler._determine_ntrip_version(
+            headers,
+            "GET /base HTTP/1.1",
+            "GET",
+            "/base",
+        )
+
+        self.assertEqual(handler.protocol_type, "ntrip1_0_http")
+        handler.client_socket.close()
+
+    def test_browser_http_11_without_host_is_still_rejected(self):
+        request = "GET /admin HTTP/1.1\r\nUser-Agent: Mozilla/5.0\r\n\r\n"
+        handler, client_socket, _ = self._request_handler(request)
+        handler.send_error_response = mock.Mock()
+        handler.handle_download = mock.Mock()
+        handler.handle_http_get = mock.Mock()
+
+        handler.handle_request()
+
+        self.assertEqual(handler.protocol_type, "http")
+        handler.send_error_response.assert_called_once_with(
+            400,
+            "Bad Request: Missing Host header",
+        )
+        handler.handle_download.assert_not_called()
+        handler.handle_http_get.assert_not_called()
+        client_socket.close()
+
+    def test_other_or_unknown_rover_without_host_is_not_legacy_compatible(self):
+        for user_agent in ("Leica rover", "Trimble receiver", "UnknownRover/1.0"):
+            with self.subTest(user_agent=user_agent):
+                request = (
+                    "GET /base HTTP/1.1\r\n"
+                    f"User-Agent: {user_agent}\r\n"
+                    "\r\n"
+                )
+                handler, client_socket, _ = self._request_handler(request)
+                handler.send_error_response = mock.Mock()
+                handler.handle_download = mock.Mock()
+                handler.handle_http_get = mock.Mock()
+
+                handler.handle_request()
+
+                self.assertNotEqual(handler.protocol_type, "ntrip1_0_http")
+                handler.send_error_response.assert_called_once_with(
+                    400,
+                    "Bad Request: Missing Host header",
+                )
+                handler.handle_download.assert_not_called()
+                handler.handle_http_get.assert_not_called()
+                client_socket.close()
+
+    def test_explicit_ntrip_2_without_host_is_still_rejected(self):
+        request = (
+            "GET /base HTTP/1.1\r\n"
+            "User-Agent: NTRIP CHC LandStar/8.3.0.20260616\r\n"
+            "Ntrip-Version: Ntrip/2.0\r\n"
+            "\r\n"
+        )
+        handler, client_socket, _ = self._request_handler(request)
+        handler.send_error_response = mock.Mock()
+        handler.handle_download = mock.Mock()
+
+        handler.handle_request()
+
+        self.assertEqual(handler.protocol_type, "ntrip2_0")
+        handler.send_error_response.assert_called_once_with(
+            400,
+            "Bad Request: Missing Host header",
+        )
+        handler.handle_download.assert_not_called()
+        client_socket.close()
+
+    def test_ntrip_2_user_agent_without_host_is_still_rejected(self):
+        request = (
+            "GET /base HTTP/1.1\r\n"
+            "User-Agent: NTRIP/2.0 rover\r\n"
+            "\r\n"
+        )
+        handler, client_socket, _ = self._request_handler(request)
+        handler.send_error_response = mock.Mock()
+        handler.handle_download = mock.Mock()
+
+        handler.handle_request()
+
+        self.assertEqual(handler.protocol_type, "ntrip2_0")
+        handler.send_error_response.assert_called_once_with(
+            400,
+            "Bad Request: Missing Host header",
+        )
+        handler.handle_download.assert_not_called()
+        client_socket.close()
+
+    def test_explicit_ntrip_2_with_host_reaches_download_handler(self):
+        request = (
+            "GET /base HTTP/1.1\r\n"
+            "Host: caster.example.invalid:2101\r\n"
+            "User-Agent: NTRIP rover/2.0\r\n"
+            "Ntrip-Version: Ntrip/2.0\r\n"
+            "\r\n"
+        )
+        handler, client_socket, _ = self._request_handler(request)
+        handler.handle_download = mock.Mock()
+
+        handler.handle_request()
+
+        self.assertEqual(handler.protocol_type, "ntrip2_0")
+        handler.handle_download.assert_called_once()
+        self.assertEqual(handler.handle_download.call_args.args[0], "/base")
+        client_socket.close()
+
+    def test_post_and_source_protocol_rules_are_unchanged(self):
+        handler = ntrip.NTRIPHandler(
+            ControlledSocket(),
+            ("127.0.0.1", 33003),
+            mock.Mock(),
+        )
+        post_headers = {"user-agent": "NTRIP CHC LandStar/8.3.0.20260616"}
+        handler._determine_ntrip_version(
+            post_headers,
+            "POST /base HTTP/1.1",
+            "POST",
+            "/base",
+        )
+        self.assertEqual(handler.protocol_type, "ntrip2_0")
+        self.assertEqual(
+            handler._is_valid_request("POST", "/base", post_headers),
+            (False, "Missing Host header"),
+        )
+
+        handler._determine_ntrip_version(
+            {},
+            "SOURCE placeholder /base",
+            "SOURCE",
+            "/base",
+        )
+        self.assertEqual(handler.protocol_type, "ntrip1_0")
+        self.assertEqual(
+            handler._is_valid_request("SOURCE", "/base", {}),
+            (True, "Valid request"),
+        )
+        handler.client_socket.close()
+
+    def test_illegal_paths_cannot_use_legacy_download_compatibility(self):
+        headers = {"user-agent": "NTRIP CHC LandStar/8.3.0.20260616"}
+        for raw_path in ("/../admin", "//base", "/base/child", "/%2e%2e/admin", "base"):
+            with self.subTest(path=raw_path):
+                handler = ntrip.NTRIPHandler(
+                    ControlledSocket(),
+                    ("127.0.0.1", 33004),
+                    mock.Mock(),
+                )
+                method, parsed_path, _ = handler._parse_request_line(
+                    f"GET {raw_path} HTTP/1.1"
+                )
+                handler._determine_ntrip_version(
+                    headers,
+                    f"GET {raw_path} HTTP/1.1",
+                    method,
+                    parsed_path,
+                )
+                self.assertNotEqual(handler.protocol_type, "ntrip1_0_http")
+                self.assertEqual(
+                    handler._is_valid_request(method, parsed_path, headers),
+                    (False, "Missing Host header"),
+                )
+                handler.client_socket.close()
 
 
 if __name__ == "__main__":
