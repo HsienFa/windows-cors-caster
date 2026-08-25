@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>2RTK NTRIP Caster</title>
+    <title>{{ app_name }}</title>
     <!-- 本機地圖程式庫 -->
     <link rel="stylesheet" href="/static/vendor/openlayers/8.2.0/ol.css" type="text/css">
     <script src="/static/vendor/openlayers/8.2.0/ol.js"></script>
@@ -1569,7 +1569,7 @@
     <div class="container">
         <!-- 顶部标题 -->
         <div class="header">
-            <h1>2RTK Ntrip Caster</h1>
+            <h1>{{ app_name }}</h1>
         </div>
 
         <!-- 导航栏 -->
@@ -1597,7 +1597,7 @@
             <div class="content-panel" id="log-panel">
                 <h3 style="margin-bottom: 1rem; color: #2c3e50;">系統日誌</h3>
                 <div class="log-terminal" id="log-terminal">
-                    <div class="log-line info">[INFO] 2RTK Ntrip Caster 啟動成功</div>
+                    <div class="log-line info">[INFO] {{ app_name }} 啟動成功</div>
                     <div class="log-line info">[INFO] 網頁管理介面已啟動</div>
                 </div>
             </div>
@@ -1606,11 +1606,12 @@
     
         <footer class="footer">
             <div id="footer-content">
-                <span id="app-name">{{ app_name or '2RTK Ntrip Caster' }}</span> 
-                <span id="app-version">v{{ app_version or '2.2.0' }}</span> | 
-                © {{ current_year or 2025 }} <span id="app-author">2RTK </span> | 
-                聯絡信箱：<a href="mailto:{{ contact_email or 'i@jia.by' }}" id="app-contact">{{ contact_email or 'i@jia.by' }}</a> |
-                網站：<a href="https://{{ website_url or '2RTK.COM' }}" id="app-website" target="_blank" rel="noopener noreferrer">{{ website_url or '2RTK.COM' }}</a> |
+                <span id="app-name">{{ app_name }}</span>
+                <span id="app-version">v{{ app_version }}</span>
+                {% if app_author %}| © {{ current_year }} <span id="app-author">{{ app_author }}</span>{% endif %}
+                {% if app_contact %}| 聯絡信箱：<a href="mailto:{{ app_contact }}" id="app-contact">{{ app_contact }}</a>{% endif %}
+                {% if app_website %}| 網站：<a href="{{ app_website }}" id="app-website" target="_blank" rel="noopener noreferrer">{{ app_website }}</a>{% endif %}
+                |
                 <a href="{{ url_for('terms_of_use') }}">使用條款</a> |
                 <a href="{{ url_for('privacy_policy') }}">隱私權政策</a>
             </div>

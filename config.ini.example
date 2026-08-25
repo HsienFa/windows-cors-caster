@@ -4,12 +4,12 @@
 # 相對路徑會以專案根目錄為基準，Windows 與 Linux 均可使用。
 
 [app]
-name = 2RTK Ntrip Caster
+name = Ntrip Caster
 version = 2.2.0
 description = Ntrip Caster
-author = 2rtk
-contact = i@jia.by
-website = https://2rtk.com
+author =
+contact =
+website =
 
 [caster]
 country = CHN

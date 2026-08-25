@@ -82,6 +82,7 @@ class GitHubActionsWorkflowTests(unittest.TestCase):
         required_test_files = (
             "test_windows_compat.py",
             "test_traditional_chinese_ui.py",
+            "test_configurable_branding.py",
             "test_security_regressions.py",
             "test_frontend_offline_privacy.py",
             "test_deployment_and_policy.py",

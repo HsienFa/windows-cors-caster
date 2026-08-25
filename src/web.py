@@ -120,7 +120,16 @@ class WebManager:
         try:
             with open(template_path, 'r', encoding='utf-8') as f:
                 template_content = f.read()
-            return render_template_string(template_content, **kwargs)
+            template_context = dict(kwargs)
+            template_context.update({
+                'app_name': config.APP_NAME,
+                'app_version': config.APP_VERSION,
+                'app_author': config.APP_AUTHOR,
+                'app_contact': config.APP_CONTACT,
+                'app_website': config.APP_WEBSITE,
+                'current_year': datetime.now().year,
+            })
+            return render_template_string(template_content, **template_context)
         except FileNotFoundError:
             log_error(f"找不到範本檔案：{template_path}")
             return f"<h1>找不到範本檔案：{template_name}</h1>"
@@ -150,18 +159,9 @@ class WebManager:
         @self.app.route('/')
         def index():
             """主页 - SPA应用"""
-            # 获取配置信息
-            app_name = config.get_config_value('app', 'name', '2RTK NTRIP Caster')
-            app_version = config.get_config_value('app', 'version', config.APP_VERSION)
-            current_year = datetime.now().year
             map_config = config.get_public_map_config()
             
             return self._load_template('spa.html', 
-                                     app_name=app_name,
-                                     app_version=app_version,
-                                     current_year=current_year,
-                                     contact_email='i@jia.by',
-                                     website_url='2RTK.COM',
                                      map_provider=map_config['provider'],
                                      google_maps_enabled=map_config['google_enabled'],
                                      map_default_latitude=map_config['default_latitude'],

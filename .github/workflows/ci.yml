@@ -53,6 +53,9 @@ jobs:
       - name: Run Traditional Chinese interface tests
         run: python -m unittest discover -s tests -p "test_traditional_chinese_ui.py"
 
+      - name: Run configurable branding tests
+        run: python -m unittest discover -s tests -p "test_configurable_branding.py"
+
       - name: Run security regression tests
         run: python -m unittest discover -s tests -p "test_security_regressions.py"
 

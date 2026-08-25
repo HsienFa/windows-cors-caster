@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>使用條款 - 2RTK Ntrip Caster</title>
+    <title>使用條款 - {{ app_name }}</title>
     <style>
         body { margin: 0; background: #f4f6f8; color: #243447; font-family: Arial, sans-serif; line-height: 1.7; }
         main { max-width: 860px; margin: 32px auto; padding: 32px; background: #fff; border-radius: 10px; box-shadow: 0 4px 18px rgba(0,0,0,.08); }
@@ -16,10 +16,15 @@
 <body>
 <main>
     <h1>使用條款初稿</h1>
-    <p class="draft">本頁是供實際營運者調整的初稿，未經律師審核，也不是法律意見。公開部署前必須補上營運者名稱、聯絡方式、適用地區及準據法。</p>
+    <p class="draft">本頁是供實際營運者確認及調整的初稿，未經律師審核，也不是法律意見。公開部署前必須確認營運者名稱、聯絡方式、適用地區及準據法。</p>
 
     <h2>軟體與營運者</h2>
+    <p>服務名稱：{{ app_name }}</p>
+    {% if app_author %}<p>營運者：<span id="app-author">{{ app_author }}</span></p>{% endif %}
+    {% if app_contact %}<p>聯絡信箱：<a href="mailto:{{ app_contact }}" id="app-contact">{{ app_contact }}</a></p>{% endif %}
+    {% if app_website %}<p>營運者網站：<a href="{{ app_website }}" id="app-website" target="_blank" rel="noopener noreferrer">{{ app_website }}</a></p>{% endif %}
     <p>本軟體用於管理 NTRIP／RTCM 連線、帳號、掛載點及基站資訊。實際部署並決定資料用途的一方是服務營運者，而不是因提供原始碼即成為營運者的專案原作者。</p>
+    <p>專案原作者及第三方權利人不因本服務採用或修改本軟體，而替營運者提供保固、背書或支援；授權與歸屬資訊仍以專案內的 LICENSE 及第三方授權文件為準。</p>
 
     <h2>Google Maps</h2>
     <p>本軟體包含可選的 Google Maps 功能與內容。啟用後，其使用受 <a href="https://maps.google.com/help/terms_maps/" target="_blank" rel="noopener noreferrer">Google Maps／Google Earth Additional Terms of Service</a>、<a href="https://policies.google.com/terms" target="_blank" rel="noopener noreferrer">Google Terms of Service</a>、<a href="https://cloud.google.com/maps-platform/terms" target="_blank" rel="noopener noreferrer">Google Maps Platform Terms of Service</a>及 <a href="https://policies.google.com/privacy" target="_blank" rel="noopener noreferrer">Google Privacy Policy</a> 約束，並以 Google 官方頁面的最新版本為準。</p>
