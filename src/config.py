@@ -9,7 +9,7 @@ import socket
 import configparser
 from pathlib import Path
 from typing import List, Tuple
-from urllib.parse import urlencode
+from urllib.parse import urlencode, urlsplit
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 
@@ -51,15 +51,43 @@ def get_config_value(section, key, fallback=None, value_type=str):
     except (configparser.NoSectionError, configparser.NoOptionError):
         return fallback
 
+
+def _normalize_app_text(value, fallback=''):
+    """清理可顯示的應用程式品牌文字，拒絕控制字元。"""
+    normalized = str(value or '').strip()
+    if any(ord(character) < 32 or ord(character) == 127 for character in normalized):
+        return fallback
+    return normalized or fallback
+
+
+def normalize_app_website(value):
+    """只允許可安全放入頁面連結的 HTTP(S) 網址。"""
+    normalized = _normalize_app_text(value)
+    if not normalized:
+        return ''
+
+    try:
+        parsed = urlsplit(normalized)
+        if parsed.scheme.lower() not in {'http', 'https'}:
+            return ''
+        if not parsed.netloc or not parsed.hostname:
+            return ''
+        if parsed.username is not None or parsed.password is not None:
+            return ''
+    except ValueError:
+        return ''
+
+    return normalized
+
 # ==================== 基本配置 ====================
 
 # 基本应用信息
-APP_NAME = get_config_value('app', 'name', '2RTK Ntrip Caster')
+APP_NAME = _normalize_app_text(get_config_value('app', 'name', ''), 'Ntrip Caster')
 APP_VERSION = get_config_value('app', 'version', '2.2.0')
 APP_DESCRIPTION = get_config_value('app', 'description', 'Ntrip Caster')
-APP_AUTHOR = get_config_value('app', 'author', '2rtk')
-APP_CONTACT = get_config_value('app', 'contact', 'i@jia.by')
-APP_WEBSITE = get_config_value('app', 'website', 'https://2rtk.com')
+APP_AUTHOR = _normalize_app_text(get_config_value('app', 'author', ''))
+APP_CONTACT = _normalize_app_text(get_config_value('app', 'contact', ''))
+APP_WEBSITE = normalize_app_website(get_config_value('app', 'website', ''))
 
 
 VERSION = APP_VERSION
