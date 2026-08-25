@@ -84,6 +84,12 @@ class NTRIPHandler:
         self.username = ""
         self.ntrip1_password = ""  
         self.current_method = "GET"  
+        self.mount_connection_established = False
+        self._cleanup_lock = threading.Lock()
+        self._cleaned_up = False
+        self._download_cleanup_lock = threading.Lock()
+        self._download_cleaned_up = False
+        self.download_connection_id = None
         
         self.client_socket.settimeout(config.SOCKET_TIMEOUT)
         
@@ -158,7 +164,7 @@ class NTRIPHandler:
                 self.send_error_response(400, "Bad Request: Empty request")
                 return
             
-            self._determine_ntrip_version(headers, request_line)
+            self._determine_ntrip_version(headers, request_line, method, path)
             
             is_valid, error_msg = self._is_valid_request(method, path, headers)
             if not is_valid:
@@ -348,7 +354,7 @@ class NTRIPHandler:
                 headers[key.strip().lower()] = value.strip()
         return headers
     
-    def _determine_ntrip_version(self, headers, request_line):
+    def _determine_ntrip_version(self, headers, request_line, method=None, path=None):
         """确定NTRIP协议类型判断"""
         
         if request_line.startswith(('SOURCE ', 'ADMIN ')):
@@ -395,9 +401,34 @@ class NTRIPHandler:
             return
         else:
             protocol_type = "unknown"
-        
-        
-        if request_line.startswith(('POST ', 'GET ')) and 'HTTP/' in request_line:
+
+        request_parts = request_line.split()
+        if method is None and request_parts:
+            method = request_parts[0]
+        if path is None and len(request_parts) >= 2:
+            path = request_parts[1]
+        method = (method or '').upper()
+
+        # 明確宣告 NTRIP 2.0 時永遠優先，且後續仍要求 Host。
+        declared_version = headers.get('ntrip-version', '').lower()
+        if 'ntrip/2.0' in declared_version:
+            self.ntrip_version = "2.0"
+            self.protocol_type = "ntrip2_0"
+            log_debug(f"检测到NTRIP 2.0协议: {self.client_address}")
+            return
+
+        if self._is_legacy_ntrip_download_request(
+            method,
+            path,
+            headers,
+            request_line,
+        ):
+            self.ntrip_version = "1.0"
+            self.protocol_type = "ntrip1_0_http"
+            log_debug(f"检测到旧式NTRIP 1.0 HTTP下载请求: {self.client_address}")
+            return
+
+        if method in ('POST', 'GET') and 'HTTP/' in request_line:
             user_agent = headers.get('user-agent', '').lower()
             
            
@@ -431,50 +462,79 @@ class NTRIPHandler:
                 self.protocol_type = "ntrip2_0"
                 log_debug(f"基于路径检测NTRIP 2.0: {self.client_address}")
                 return
-        
-        # 检查Ntrip-Version头部字段（NTRIP 2.0特有）
-        ntrip_version = headers.get('ntrip-version', '')
-        if 'NTRIP/2.0' in ntrip_version:
-            self.ntrip_version = "2.0"
-            self.protocol_type = "ntrip2_0"
-            log_debug(f"检测到NTRIP 2.0协议: {self.client_address}")
-        elif protocol_type == "http":
-            # HTTP请求但没有Ntrip-Version头，判断是否需要协议降级
-            if self._should_downgrade_protocol(headers):
-                self.ntrip_version = "1.0"
-                self.protocol_type = "ntrip1_0"
-                log_debug(f"协议降级到NTRIP 1.0: {self.client_address}")
+
+        if protocol_type == "http":
+            user_agent = headers.get('user-agent', '').lower()
+            if any(keyword in user_agent for keyword in ['ntrip', 'rtk', 'gnss']):
+                self.ntrip_version = "2.0"
+                self.protocol_type = "ntrip2_0"
+                log_debug(f"基于User-Agent检测NTRIP 2.0: {self.client_address}")
             else:
-                
-                user_agent = headers.get('user-agent', '').lower()
-                if any(keyword in user_agent for keyword in ['ntrip', 'rtk', 'gnss']):
-                    self.ntrip_version = "2.0"
-                    self.protocol_type = "ntrip2_0"
-                    log_debug(f"基于User-Agent检测NTRIP 2.0: {self.client_address}")
-                else:
-                    self.ntrip_version = "2.0"
-                    self.protocol_type = "http"
-                    log_debug(f"使用HTTP协议: {self.client_address}")
+                self.ntrip_version = "2.0"
+                self.protocol_type = "http"
+                log_debug(f"使用HTTP协议: {self.client_address}")
         else:
             # 其他情况默认为NTRIP 1.0
             self.ntrip_version = "1.0"
             self.protocol_type = "ntrip1_0"
             log_debug(f"默认使用NTRIP 1.0: {self.client_address}")
-    
-    def _should_downgrade_protocol(self, headers):
-        """判断是否应该降级协议到NTRIP 1.0"""
-        
+
+    def _is_legacy_ntrip_download_request(self, method, path, headers, request_line):
+        """只相容可辨識且未宣告 2.0 的舊式 NTRIP GET 請求。"""
+        if method != 'GET' or 'host' in headers:
+            return False
+
+        if 'ntrip/2.0' in headers.get('ntrip-version', '').lower():
+            return False
+
         user_agent = headers.get('user-agent', '').lower()
-        old_clients = ['ntrip', 'rtk', 'gnss', 'leica', 'trimble']
-        
-        for client in old_clients:
-            if client in user_agent and '2.0' not in user_agent:
-                return True
-        
-        required_headers = ['connection', 'host']
-        missing_headers = [h for h in required_headers if h not in headers]
-        
-        return len(missing_headers) > 0
+        if not any(marker in user_agent for marker in ('ntrip', 'landstar')):
+            return False
+        if self._user_agent_declares_ntrip_2(user_agent):
+            return False
+
+        parts = request_line.split()
+        if len(parts) != 3:
+            return False
+        raw_method, raw_path, raw_protocol = parts
+        if raw_method.upper() != 'GET' or raw_path != path:
+            return False
+        if raw_protocol.upper() not in ('HTTP/1.0', 'HTTP/1.1'):
+            return False
+
+        return self._is_safe_ntrip_download_path(path)
+
+    @staticmethod
+    def _user_agent_declares_ntrip_2(user_agent):
+        """只辨識協定標記，不把 LandStar 應用程式版本誤當成 NTRIP 2.0。"""
+        normalized = ' '.join(user_agent.lower().split())
+        return any(
+            marker in normalized
+            for marker in ('ntrip/2.0', 'ntrip 2.0', 'ntrip v2.0')
+        )
+
+    @staticmethod
+    def _is_safe_ntrip_download_path(path):
+        """限制相容模式為 Sourcetable 根路徑或單一安全掛載點。"""
+        if path == '/':
+            return True
+        if not path or not path.startswith('/') or path.startswith('//'):
+            return False
+
+        mount_name = path[1:]
+        if not mount_name or len(mount_name) > 255:
+            return False
+        if mount_name in ('.', '..') or '..' in mount_name:
+            return False
+        if any(character in mount_name for character in ('/', '\\', '?', '#', '%')):
+            return False
+        if any(character.isspace() or ord(character) < 32 for character in mount_name):
+            return False
+
+        return all(
+            character.isalnum() or character in ('-', '_', '.', '~')
+            for character in mount_name
+        )
     
     def _is_valid_request(self, method, path, headers):
         """验证请求的有效性，"""
@@ -1058,29 +1118,6 @@ a=control:*
             
             self.mount = mount
              
-            if connection.get_connection_manager().is_mount_online(mount):
-                existing_mount = connection.get_connection_manager().get_mount_info(mount)
-                if existing_mount and existing_mount['ip_address'] != self.client_address[0]:
-                    
-                    message_key = f"mount_occupied_{mount}_{existing_mount['ip_address']}"
-                    if anti_spam_logger.should_log(message_key):
-                        suppressed = anti_spam_logger.get_suppressed_count(message_key)
-                        if suppressed > 0:
-                            logger.log_warning(f"掛載點 {mount} 已由 {existing_mount['ip_address']} 占用，拒絕來自 {self.client_address[0]} 的連線（已抑制 {suppressed} 則相似訊息）")
-                        else:
-                            logger.log_warning(f"掛載點 {mount} 已由 {existing_mount['ip_address']} 占用，拒絕來自 {self.client_address[0]} 的連線")
-                    self.send_error_response(409, f"Mount point {mount} is already online from {existing_mount['ip_address']}")
-                    
-                    try:
-                        self.client_socket.close()
-                    except:
-                        pass
-                    return
-                elif existing_mount and existing_mount['ip_address'] == self.client_address[0]:
-                    logger.log_warning(f"偵測到相同 IP（{self.client_address[0]}）的重複連線，可能為連線異常，允許重新連線")
-                    
-                    connection.get_connection_manager().remove_mount_connection(mount, "相同 IP 重複連線")
-            
             # 所有请求都必须通过完整的数据库验证，确保挂载点存在且密码正确
             auth_header = headers.get('authorization', '')
             auth_log_message = "已收到認證標頭" if auth_header else "未收到認證標頭"
@@ -1099,8 +1136,54 @@ a=control:*
                     pass
                 return
              
+            manager = connection.get_connection_manager()
             try:
-                success, message = connection.get_connection_manager().add_mount_connection(mount, self.client_address[0], getattr(self, 'user_agent', 'Unknown'), getattr(self, 'ntrip_version', '1.0'), self.client_socket)
+                # 掛載點替換、註冊與成功回覆必須同步完成。這可防止另一條
+                # 清理路徑在 ICY/HTTP 200 傳送前關閉剛註冊的來源 socket。
+                with manager.mount_lock:
+                    existing_mount = manager.online_mounts.get(mount)
+                    if existing_mount and existing_mount.ip_address != self.client_address[0]:
+                        existing_ip = existing_mount.ip_address
+                        message_key = f"mount_occupied_{mount}_{existing_ip}"
+                        if anti_spam_logger.should_log(message_key):
+                            suppressed = anti_spam_logger.get_suppressed_count(message_key)
+                            if suppressed > 0:
+                                logger.log_warning(f"掛載點 {mount} 已由 {existing_ip} 占用，拒絕來自 {self.client_address[0]} 的連線（已抑制 {suppressed} 則相似訊息）")
+                            else:
+                                logger.log_warning(f"掛載點 {mount} 已由 {existing_ip} 占用，拒絕來自 {self.client_address[0]} 的連線")
+                        self.send_error_response(409, f"Mount point {mount} is already online from {existing_ip}")
+                        return
+
+                    if existing_mount:
+                        logger.log_warning(f"偵測到相同 IP（{self.client_address[0]}）的重複連線，允許已驗證來源重新連線")
+                        manager.remove_mount_connection(
+                            mount,
+                            "相同 IP 重複連線",
+                            expected_socket=existing_mount.client_socket,
+                        )
+
+                    success, message = manager.add_mount_connection(
+                        mount,
+                        self.client_address[0],
+                        getattr(self, 'user_agent', 'Unknown'),
+                        getattr(self, 'ntrip_version', '1.0'),
+                        self.client_socket,
+                        start_correction=False,
+                    )
+                    if success:
+                        self.mount_connection_established = True
+                        try:
+                            self.send_upload_success_response()
+                        except Exception:
+                            manager.remove_mount_connection(
+                                mount,
+                                "上傳成功回覆失敗",
+                                expected_socket=self.client_socket,
+                                close_socket=False,
+                            )
+                            self.mount_connection_established = False
+                            raise
+
                 if not success:
                     logger.log_warning(f"掛載點 {mount} 的連線遭拒：{message}")
                     logger.log_info(f"連線拒絕詳細資料 - 掛載點：{mount}，IP：{self.client_address[0]}，原因：{message}")
@@ -1112,16 +1195,19 @@ a=control:*
                         pass
                     return
 
-                self.mount_connection_established = True
-                
                 if success:
                     logger.log_info(f"掛載點 {mount} 已成功新增至連線管理器：{message}")
                 else:
                     logger.log_warning(f"掛載點 {mount} 新增至連線管理器失敗：{message}")
             except Exception as e:
-                logger.log_error(f"將掛載點 {mount} 新增至連線管理器時發生例外：{e}", exc_info=True)
+                logger.log_error(f"將掛載點 {mount} 新增至連線管理器或傳送成功回覆時發生例外：{e}", exc_info=True)
+                self._cleanup()
+                return
 
-            self.send_upload_success_response()
+            try:
+                manager.start_str_correction(mount)
+            except Exception as correction_error:
+                logger.log_warning(f"啟動掛載點 {mount} 的 STR 修正失敗，RTCM 接收將繼續：{correction_error}")
             
             username_for_log = getattr(self, 'username', mount) if hasattr(self, 'username') else mount
             logger.log_mount_operation('upload_connected', mount, username_for_log)
@@ -1155,31 +1241,43 @@ a=control:*
                 self.send_error_response(404, "Mount point not found")
                 return
             
-            # 添加到连接管理器
-            connection_id = connection.add_user_connection(self.username, mount, self.client_address[0])
-            
-            # 添加客户端到转发器
             try:
-                self.client_info = forwarder.add_client(self.client_socket, self.username, mount,
-                                                       self.user_agent, self.client_address, 
-                                                       self.ntrip_version, connection_id)
+                self.download_connection_id = connection.add_user_connection(
+                    self.username,
+                    mount,
+                    self.client_address[0],
+                    self.user_agent,
+                    self.ntrip_version,
+                )
+                if not self.download_connection_id:
+                    raise RuntimeError("Failed to register user connection")
+
+                # 先註冊為 pending；完整成功回覆送出前不得接收 RTCM。
+                self.client_info = forwarder.add_client(
+                    self.client_socket,
+                    self.username,
+                    mount,
+                    self.user_agent,
+                    self.client_address,
+                    self.ntrip_version,
+                    self.download_connection_id,
+                    active=False,
+                )
                 if not self.client_info:
-                    self.send_error_response(500, "Failed to add client")
-                    return
+                    raise RuntimeError("Failed to add client")
+
+                self.send_download_success_response()
+                forwarder.activate_client(self.client_info)
             except Exception as e:
-                logger.log_error(f"新增用戶端失敗：{e}", exc_info=True)
-                self.send_error_response(500, "Failed to add client")
+                logger.log_error(f"建立下載連線失敗：{e}", exc_info=True)
+                self._cleanup_download_connection()
                 return
-            
-            self.send_download_success_response()
-            
-            logger.log_client_connect(self.username, mount, self.client_address[0], self.user_agent)
-            
+
             self._keep_connection_alive()
         
         except Exception as e:
             logger.log_error(f"處理下載請求時發生例外：{e}", exc_info=True)
-            self.send_error_response(500, "Internal Server Error")
+            self._cleanup_download_connection()
     
     def handle_http_get(self, path, headers):
         """处理普通HTTP GET请求"""
@@ -1226,33 +1324,7 @@ a=control:*
         except Exception as e:
             logger.log_error(f"接收 RTCM 資料時發生例外：{e}", exc_info=True)
         finally:
-            
-            def delayed_cleanup():
-                """延迟清理函数"""
-                try:
-                    forwarder.remove_mount_buffer(mount)
-                except Exception as e:
-                    logger.log_warning(f"清理轉送器緩衝區失敗：{e}", 'ntrip')
-                
-                try:
-                    connection.get_connection_manager().remove_mount_connection(mount)
-                except Exception as e:
-                    log_warning(f"清理掛載點連線失敗：{e}")
-                
-
-                logger.log_mount_operation('disconnected', mount)
-                # 改为debug级别，避免频繁日志
-                log_debug(f"挂载点 {mount} 延迟清理完成")
-            
-            # 记录断开事件，改为warning级别以确保重要信息被记录
-            log_warning(f"掛載點 {mount} 的連線中斷，將於 1.5 秒後清理資料")
-            
-
-            cleanup_timer = threading.Timer(1.5, delayed_cleanup)
-            cleanup_timer.daemon = True  # 设置为守护线程
-            cleanup_timer.start()
-            
-
+            log_warning(f"掛載點 {mount} 的連線中斷，立即清理目前來源連線")
             self._cleanup()
     
     def _keep_connection_alive(self):
@@ -1275,10 +1347,45 @@ a=control:*
             
             pass
         finally:
-            
-            if hasattr(self, 'client_info') and self.client_info:
-                forwarder.remove_client(self.client_info)
-                logger.log_client_disconnect(self.username, self.mount, self.client_address[0])
+            self._cleanup_download_connection()
+
+    def _cleanup_download_connection(self):
+        """同步且可重複執行地回滾下載端的所有註冊與 socket。"""
+        with self._download_cleanup_lock:
+            if self._download_cleaned_up:
+                return
+            self._download_cleaned_up = True
+
+        client_info = getattr(self, 'client_info', None)
+        connection_id = self.download_connection_id
+        forwarder_cleaned = False
+
+        if client_info is not None:
+            try:
+                forwarder_cleaned = forwarder.remove_client(client_info)
+            except Exception as e:
+                logger.log_warning(f"從轉送器移除下載用戶端失敗：{e}", 'ntrip')
+
+        if connection_id and not forwarder_cleaned:
+            try:
+                connection.remove_user_connection(
+                    self.username,
+                    connection_id=connection_id,
+                )
+            except Exception as e:
+                logger.log_warning(f"移除下載使用者連線失敗：{e}", 'ntrip')
+
+        self.client_info = None
+        self.download_connection_id = None
+
+        try:
+            self.client_socket.shutdown(socket.SHUT_RDWR)
+        except OSError:
+            pass
+        try:
+            self.client_socket.close()
+        except OSError:
+            pass
     
     def _send_mount_list(self):
         """发送挂载点列表"""
@@ -1366,15 +1473,13 @@ a=control:*
         if self.ntrip_version == "2.0":
             self._send_response(
                 "HTTP/1.1 200 OK",
-                additional_headers=["Connection: keep-alive"]
+                additional_headers=["Connection: keep-alive"],
+                raise_errors=True,
             )
         else:
             # NTRIP 1.0格式
-            try:
-                response = "ICY 200 OK\r\n\r\n"
-                self.client_socket.send(response.encode('utf-8'))
-            except Exception as e:
-                logger.log_error(f"傳送上傳成功回應失敗：{e}", exc_info=True)
+            response = "ICY 200 OK\r\n\r\n"
+            self.client_socket.sendall(response.encode('utf-8'))
     
     def send_download_success_response(self):
         """发送下载成功响应"""
@@ -1382,16 +1487,14 @@ a=control:*
             self._send_response(
                 "HTTP/1.1 200 OK",
                 content_type="application/octet-stream",
-                additional_headers=["Connection: keep-alive"]
+                additional_headers=["Connection: keep-alive"],
+                raise_errors=True,
             )
         else:
             # NTRIP 1.0格式 - 强制保持连接，忽略客户端的Connection: close
-            try:
-                response = "ICY 200 OK\r\nConnection: keep-alive\r\n\r\n"
-                self.client_socket.send(response.encode('utf-8'))
-                logger.log_debug(f"NTRIP 1.0下载响应已发送，保持长连接: {self.client_address}", 'ntrip')
-            except Exception as e:
-                logger.log_error(f"傳送下載成功回應失敗：{e}", exc_info=True)
+            response = "ICY 200 OK\r\nConnection: keep-alive\r\n\r\n"
+            self.client_socket.sendall(response.encode('utf-8'))
+            logger.log_debug(f"NTRIP 1.0下载响应已发送，保持长连接: {self.client_address}", 'ntrip')
     
     def send_auth_challenge(self, message="Authentication required", auth_type="both"):
         """发送认证挑战"""
@@ -1487,7 +1590,14 @@ a=control:*
         
         return "\r\n".join(headers) + "\r\n"
     
-    def _send_response(self, status_line, content_type=None, content=None, additional_headers=None):
+    def _send_response(
+        self,
+        status_line,
+        content_type=None,
+        content=None,
+        additional_headers=None,
+        raise_errors=False,
+    ):
         """发送标准化HTTP响应"""
         try:
             response = status_line + "\r\n"
@@ -1504,25 +1614,43 @@ a=control:*
             if content:
                 response += content
             
-            self.client_socket.send(response.encode('utf-8'))
+            self.client_socket.sendall(response.encode('utf-8'))
             
         except Exception as e:
             logger.log_error(f"傳送回應失敗：{e}", exc_info=True)
+            if raise_errors:
+                raise
     
     def _cleanup(self):
         """清理资源"""
+        with self._cleanup_lock:
+            if self._cleaned_up:
+                return
+            self._cleaned_up = True
+
         try:
             # print(f"\n>>> 连接清理开始 - IP: {self.client_address[0]}, 时间: {datetime.now().strftime('%H:%M:%S.%f')[:-3]}")
 
+            if self._download_cleaned_up or self.download_connection_id or getattr(self, 'client_info', None):
+                self._cleanup_download_connection()
+                return
+
             if hasattr(self, 'username') and hasattr(self, 'mount'):
-                if hasattr(self, 'client_info'):  # 下载连接
-                    # print(f">>> 移除用户连接 - 用户: {self.username}, 挂载点: {self.mount}")
-                    connection.remove_user_connection(self.username, self.client_address[0], self.mount)
-                else:  # 上传连接
+                if not hasattr(self, 'client_info'):  # 上传连接
                     # 只有真正成功建立的挂载点连接才在断开时移除
-                    if hasattr(self, 'mount_connection_established') and self.mount_connection_established:
+                    if self.mount_connection_established:
                         # print(f">>> 移除挂载点连接 - 挂载点: {self.mount}")
-                        connection.remove_mount_connection(self.mount)
+                        connection.get_connection_manager().remove_mount_connection(
+                            self.mount,
+                            expected_socket=self.client_socket,
+                            close_socket=False,
+                        )
+                        self.mount_connection_established = False
+                        try:
+                            forwarder.remove_mount_buffer(self.mount)
+                        except Exception as e:
+                            logger.log_warning(f"清理轉送器緩衝區失敗：{e}", 'ntrip')
+                        logger.log_mount_operation('disconnected', self.mount)
                     else:
                         # print(f">>> 跳过移除挂载点连接 - 挂载点: {self.mount} (连接未成功建立)")
                         pass
@@ -1530,6 +1658,10 @@ a=control:*
                 # print(f">>> 跳过连接移除 - username存在: {hasattr(self, 'username')}, mount存在: {hasattr(self, 'mount')}") 
                 pass
             
+            try:
+                self.client_socket.shutdown(socket.SHUT_RDWR)
+            except OSError:
+                pass
             self.client_socket.close()
             # print(f">>> 连接清理完成 - IP: {self.client_address[0]}")
         except Exception as e:

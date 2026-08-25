@@ -131,6 +131,14 @@ jobs:
         shell: pwsh
         run: python -m unittest discover -s tests -p "test_windows_compat.py"
 
+      - name: Run NTRIP upload socket lifecycle tests
+        shell: pwsh
+        run: python -m unittest discover -s tests -p "test_ntrip_upload_lifecycle.py"
+
+      - name: Run NTRIP download handshake lifecycle tests
+        shell: pwsh
+        run: python -m unittest discover -s tests -p "test_ntrip_download_lifecycle.py"
+
   deployment-static:
     name: GNU Make and Docker Compose static validation
     runs-on: ubuntu-latest
