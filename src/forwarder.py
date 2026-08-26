@@ -144,6 +144,7 @@ class SimpleDataForwarder:
         
         self.broadcast_thread = None
         self.running = False
+        self._stop_event = threading.Event()
         
         self.stats = {
             'total_clients': 0,
@@ -160,6 +161,7 @@ class SimpleDataForwarder:
             return
             
         self.running = True
+        self._stop_event.clear()
         self.broadcast_thread = threading.Thread(target=self._broadcast_loop, daemon=True)
         self.broadcast_thread.start()
         logger.log_system_event('資料轉送器已啟動')
@@ -167,15 +169,37 @@ class SimpleDataForwarder:
     def stop(self):
         """停止广播线程"""
         self.running = False
+        self._stop_event.set()
         
         if self.broadcast_thread and self.broadcast_thread.is_alive():
             self.broadcast_thread.join(timeout=5)
         
-        # 关闭所有客户端连接
+        # 關閉所有用戶端連線；先移出註冊表，避免廣播執行緒重複處理。
         with self.client_lock:
-            for mount_clients in self.clients.values():
-                for client_info in mount_clients[:]:
-                    self._close_client(client_info)
+            client_connections = [
+                client_info
+                for mount_clients in self.clients.values()
+                for client_info in mount_clients
+            ]
+            self.clients.clear()
+            self.stats['active_clients'] = 0
+
+        for client_info in client_connections:
+            self._close_client(client_info)
+
+        with self.subscriber_lock:
+            subscribers = [
+                subscriber
+                for mount_subscribers in self.subscribers.values()
+                for subscriber in mount_subscribers
+            ]
+            self.subscribers.clear()
+
+        for subscriber in subscribers:
+            try:
+                subscriber.close()
+            except (OSError, AttributeError, ValueError):
+                pass
                     
         logger.log_system_event('資料轉送器已停止')
     
@@ -373,8 +397,12 @@ class SimpleDataForwarder:
         """关闭客户端连接"""
         try:
             socket_obj = client_info['socket']
+            try:
+                socket_obj.shutdown(socket.SHUT_RDWR)
+            except (OSError, AttributeError, ValueError):
+                pass
             socket_obj.close()
-        except Exception as e:
+        except (OSError, AttributeError, KeyError, ValueError) as e:
             logger.log_debug(f"关闭客户端连接失败: {e}", 'ntrip')
     
     def upload_data(self, mount, data_chunk):
@@ -417,10 +445,10 @@ class SimpleDataForwarder:
         while self.running:
             try:
                 self._broadcast_data()
-                time.sleep(self.broadcast_interval)
+                self._stop_event.wait(self.broadcast_interval)
             except Exception as e:
                 logger.log_error(f"廣播迴圈發生例外：{e}", exc_info=True)
-                time.sleep(1)
+                self._stop_event.wait(1)
     
     def _broadcast_data(self):
         """广播数据到所有客户端"""

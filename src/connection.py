@@ -3,6 +3,7 @@
 
 import time
 import json
+import socket
 import threading
 from threading import Lock, RLock, Thread
 from collections import defaultdict, deque
@@ -116,6 +117,53 @@ class ConnectionManager:
         
         self.mount_lock = RLock()
         self.user_lock = RLock()
+
+    @staticmethod
+    def _close_socket(socket_obj):
+        """同步且可重複地關閉 socket，用於完整服務關機。"""
+        if socket_obj is None:
+            return
+        try:
+            socket_obj.shutdown(socket.SHUT_RDWR)
+        except (OSError, AttributeError, ValueError):
+            pass
+        try:
+            socket_obj.close()
+        except (OSError, AttributeError, ValueError):
+            pass
+
+    def close_all_connections(self):
+        """關閉目前持有的來源與使用者 socket，並清空線上狀態。"""
+        with self.mount_lock:
+            mount_connections = [
+                (mount_name, mount_info.client_socket)
+                for mount_name, mount_info in self.online_mounts.items()
+            ]
+
+        for mount_name, client_socket in mount_connections:
+            self.remove_mount_connection(
+                mount_name,
+                reason="服務關機",
+                expected_socket=client_socket,
+                close_socket=False,
+            )
+            self._close_socket(client_socket)
+
+        with self.user_lock:
+            user_sockets = [
+                connection_info.get('client_socket')
+                for connections in self.online_users.values()
+                for connection_info in connections
+            ]
+            self.online_users.clear()
+            self.user_connection_count.clear()
+            self.mount_connection_count.clear()
+            self.clients.clear()
+
+        for client_socket in user_sockets:
+            self._close_socket(client_socket)
+
+        return len(mount_connections) + len(user_sockets)
         
         
     def print_active_connections(self):

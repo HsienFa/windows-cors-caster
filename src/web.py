@@ -4,6 +4,7 @@ web.py - Web管理模块
 功能：提供前端接口，展示挂载点的实时信息，支持查看和查询挂载点解析数据
 """
 
+import threading
 import time
 import json
 import logging
@@ -17,6 +18,7 @@ from flask import Flask, render_template_string, request, redirect, url_for, ses
 # from flask_cors import CORS  # 已移除，不需要CORS功能
 import os
 from flask_socketio import SocketIO, emit, join_room
+from werkzeug.serving import make_server
 
 from .database import DatabaseManager
 from . import config
@@ -83,6 +85,10 @@ class WebManager:
         # 实时数据推送线程
         self.push_thread = None
         self.push_running = False
+        self._push_stop_event = threading.Event()
+        self._server_lock = threading.Lock()
+        self._http_server = None
+        self._web_stop_requested = False
         
         # 设置logger的web实例引用，用于实时日志推送
         logger.set_web_instance(self)
@@ -314,34 +320,34 @@ class WebManager:
         @self.app.route('/api/system/restart', methods=['POST'])
         @self.require_login
         def restart_system():
-            """重启程序API"""
+            """要求服務安全關機；由外部服務管理器決定是否重新啟動。"""
             try:
-                import os
-                import sys
-                import threading
-                
-                def delayed_restart():
-                    """延迟重启程序"""
-                    time.sleep(1)  # 给响应时间返回
-                    log_info("管理員要求重新啟動程式")
-                    os._exit(0)  # 强制退出程序
-                
-                # 在新线程中执行重启
-                restart_thread = threading.Thread(target=delayed_restart)
-                restart_thread.daemon = True
-                restart_thread.start()
+                service_manager = get_server_instance()
+                if service_manager is None:
+                    return jsonify({
+                        'success': False,
+                        'message': '伺服器執行個體無法使用'
+                    }), 503
+
+                log_info("管理員要求安全關閉程式")
+                shutdown_thread = threading.Thread(
+                    target=service_manager.stop_all_services,
+                    name='Web-Graceful-Shutdown',
+                    daemon=True,
+                )
+                shutdown_thread.start()
                 
                 return jsonify({
                     'success': True,
-                    'message': '程式重新啟動指令已送出'
+                    'message': '安全關機指令已送出；如需重新啟動，請由服務管理器執行'
                 })
                 
             except Exception as e:
-                    log_error(f"重新啟動程式失敗：{e}")
-                    return jsonify({
-                        'success': False,
-                        'error': str(e)
-                    }), 500
+                log_error(f"要求安全關機失敗：{e}")
+                return jsonify({
+                    'success': False,
+                    'error': str(e)
+                }), 500
         
 
         
@@ -1246,6 +1252,7 @@ class WebManager:
         # 启动实时数据推送
         if not self.push_running:
             self.push_running = True
+            self._push_stop_event.clear()
             self.push_thread = Thread(target=self._push_data_loop, daemon=True)
             self.push_thread.start()
             log_system_event('Web 即時資料推送已啟動')
@@ -1257,6 +1264,7 @@ class WebManager:
         # 停止实时数据推送
         if self.push_running:
             self.push_running = False
+            self._push_stop_event.set()
             if self.push_thread:
                 self.push_thread.join(timeout=5)
             log_system_event('Web 即時資料推送已停止')
@@ -1305,10 +1313,10 @@ class WebManager:
                 # 移除调试日志输出
                 pass
                 
-                time.sleep(config.REALTIME_PUSH_INTERVAL)
+                self._push_stop_event.wait(config.REALTIME_PUSH_INTERVAL)
             except Exception as e:
                 log_error(f"資料推送發生例外：{e}", exc_info=True)
-                time.sleep(1)
+                self._push_stop_event.wait(1)
     
     def push_log_message(self, message, log_type='info'):
         """推送日志消息到前端"""
@@ -1342,7 +1350,36 @@ class WebManager:
         host = host or config.WEB_HOST
         port = port or config.WEB_PORT
         debug = debug if debug is not None else config.DEBUG
-        self.socketio.run(self.app, host=host, port=port, debug=debug, allow_unsafe_werkzeug=True)
+        http_server = make_server(host, port, self.app, threaded=True)
+
+        with self._server_lock:
+            if self._web_stop_requested:
+                http_server.server_close()
+                return
+            self._http_server = http_server
+
+        try:
+            http_server.serve_forever()
+        finally:
+            http_server.server_close()
+            with self._server_lock:
+                if self._http_server is http_server:
+                    self._http_server = None
+
+    def stop_web_server(self):
+        """停止可控的 Werkzeug WSGI server；重複呼叫不會重複關閉。"""
+        with self._server_lock:
+            self._web_stop_requested = True
+            http_server = self._http_server
+            self._http_server = None
+
+        if http_server is not None:
+            http_server.shutdown()
+
+    def stop(self):
+        """停止 Web listener 與其背景資料推送。"""
+        self.stop_web_server()
+        self.stop_rtcm_parsing()
     
 
 # 便捷函数

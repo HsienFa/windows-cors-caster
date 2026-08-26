@@ -33,6 +33,7 @@ from src.database import DatabaseManager
 from src.web import create_web_manager
 from src.ntrip import NTRIPCaster
 from src.connection import get_connection_manager
+from src.rtcm2_manager import parser_manager
 
 def setup_logging():
     """设置日志系统"""
@@ -109,14 +110,24 @@ def check_environment():
 
 class ServiceManager:
     """服务管理器 - 统一管理所有服务组件"""
+
+    THREAD_JOIN_TIMEOUT = 5.0
+    SHUTDOWN_WAIT_TIMEOUT = 30.0
     
     def __init__(self):
         self.db_manager = None
         self.web_manager = None
         self.ntrip_caster = None
+        self.ntrip_thread = None
         self.web_thread = None
         self.running = False
-        self.stopping = False  # 添加停止标志位，防止重复调用
+        self.stopping = False
+        self.stopped = False
+        self.shutdown_started = False
+        self.shutdown_owner_thread_id = None
+        self.shutdown_event = threading.Event()
+        self.shutdown_complete = threading.Event()
+        self.shutdown_lock = threading.Lock()
         self.start_time = None
         self.stats_thread = None
         self.stats_interval = 10  # 统计打印间隔（秒）
@@ -128,6 +139,7 @@ class ServiceManager:
         """启动所有服务"""
         try:
             self.start_time = time.time()
+            self._register_signal_handlers()
             logger.log_system_event(f'啟動 2RTK NTRIP Caster v{config.VERSION}')
             
             # 1. 初始化数据库
@@ -150,11 +162,7 @@ class ServiceManager:
             self.ntrip_caster = NTRIPCaster(self.db_manager)
             self.ntrip_thread = threading.Thread(target=self.ntrip_caster.start, daemon=True)
             self.ntrip_thread.start()
-            time.sleep(1)  # 等待NTRIP服务器启动
-            
-            # 6. 注册信号处理
-            signal.signal(signal.SIGINT, self._signal_handler)
-            signal.signal(signal.SIGTERM, self._signal_handler)
+            self.shutdown_event.wait(1)  # 等待NTRIP服务器启动，关机时可立即中断
             
             self.running = True
             logger.log_system_event(f'所有服務已啟動 - NTRIP 連接埠：{config.NTRIP_PORT}，Web 連接埠：{config.WEB_PORT}')
@@ -169,6 +177,11 @@ class ServiceManager:
             logger.log_error(f"啟動服務失敗：{e}", exc_info=True)
             self.stop_all_services()
             raise
+
+    def _register_signal_handlers(self):
+        """在主執行緒註冊 Windows／POSIX 共用的安全關機訊號。"""
+        signal.signal(signal.SIGINT, self._signal_handler)
+        signal.signal(signal.SIGTERM, self._signal_handler)
     
     def _start_web_interface(self):
         """启动Web管理界面"""
@@ -204,9 +217,8 @@ class ServiceManager:
  
     def _stats_monitor_worker(self):
         """统计监控工作线程"""
-        while self.running:
+        while not self.shutdown_event.wait(self.stats_interval):
             try:
-                time.sleep(self.stats_interval)
                 if self.running:
                     self._update_system_stats()
             except Exception as e:
@@ -360,7 +372,7 @@ class ServiceManager:
                     break
                 
                 # 短暂休眠避免CPU占用过高
-                time.sleep(1)
+                self.shutdown_event.wait(1)
                 
             except Exception as e:
                 logger.log_error(f"主迴圈發生例外：{e}", exc_info=True)
@@ -368,56 +380,105 @@ class ServiceManager:
     
     def _signal_handler(self, signum, frame):
         """信号处理器"""
-        if self.stopping:
-            logger.log_system_event(f'收到訊號 {signum}，但服務正在關閉，忽略重複訊號')
-            return
         logger.log_system_event(f'收到訊號 {signum}，開始關閉所有服務')
         self.stop_all_services()
+
+    def _cleanup_component(self, component_name, callback):
+        """隔離單一元件的關機錯誤，確保後續元件仍會清理。"""
+        try:
+            callback()
+            return True
+        except Exception as e:
+            logger.log_error(f'停止 {component_name} 時發生錯誤：{e}', exc_info=True)
+            return False
+
+    def _join_thread(self, thread, thread_name):
+        """以固定上限等待背景執行緒，不讓關機永久阻塞。"""
+        if thread is None or thread is threading.current_thread():
+            return
+        try:
+            if thread.is_alive():
+                thread.join(timeout=self.THREAD_JOIN_TIMEOUT)
+                if thread.is_alive():
+                    logger.log_warning(
+                        f'{thread_name} 未在 {self.THREAD_JOIN_TIMEOUT:.0f} 秒內結束'
+                    )
+        except Exception as e:
+            logger.log_error(f'等待 {thread_name} 結束時發生錯誤：{e}', exc_info=True)
     
     def stop_all_services(self):
-        """停止所有服务"""
-        if self.stopping:
-            logger.log_system_event('服務正在關閉，略過重複呼叫')
-            return
-            
-        self.stopping = True
+        """依固定順序完整停止所有服務；重複呼叫不會再次清理。"""
+        with self.shutdown_lock:
+            if self.shutdown_started:
+                shutdown_owner_thread_id = self.shutdown_owner_thread_id
+                shutdown_already_started = True
+            else:
+                self.shutdown_started = True
+                self.shutdown_owner_thread_id = threading.get_ident()
+                self.stopping = True
+                shutdown_already_started = False
+
+        if shutdown_already_started:
+            if shutdown_owner_thread_id != threading.get_ident():
+                self.shutdown_complete.wait(timeout=self.SHUTDOWN_WAIT_TIMEOUT)
+                return False
+            return False
+
         logger.log_system_event('正在關閉所有服務')
-        
+
         try:
             self.running = False
-            
-            # 等待统计监控线程结束
-            if self.stats_thread and self.stats_thread.is_alive():
-                logger.log_system_event('正在停止統計監控執行緒')
-                self.stats_thread.join(timeout=2)
-            
-            # 停止NTRIP服务器
+
+            # 1. 先停止接受新的 NTRIP 連線。
             if self.ntrip_caster:
-                try:
-                    self.ntrip_caster.stop()
-                except Exception as e:
-                    logger.log_error(f'停止 NTRIP 伺服器時發生錯誤：{e}')
-        
-            # 停止数据转发器
-            try:
-                forwarder.stop_forwarder()
-            except Exception as e:
-                logger.log_error(f'停止資料轉送器時發生錯誤：{e}')
-            
-            # 停止Web管理器
+                self._cleanup_component(
+                    'NTRIP listener',
+                    self.ntrip_caster.stop_accepting,
+                )
+
+            # 2. 明確停止 Web listener，釋放 Web 連接埠。
             if self.web_manager:
-                try:
-                    self.web_manager.stop_rtcm_parsing()
-                except Exception as e:
-                    logger.log_error(f'停止 Web 管理器時發生錯誤：{e}')
-            
+                self._cleanup_component(
+                    'Web listener',
+                    self.web_manager.stop_web_server,
+                )
+
+            # 3. 通知並停止所有背景工作。
+            self.shutdown_event.set()
+            self._join_thread(self.stats_thread, '統計監控執行緒')
+
+            if self.web_manager:
+                self._cleanup_component(
+                    'Web 即時資料推送',
+                    self.web_manager.stop_rtcm_parsing,
+                )
+            self._cleanup_component('RTCM 解析器', parser_manager.stop_all)
+            self._cleanup_component('資料轉送器', forwarder.stop_forwarder)
+
+            # 4. 關閉所有已接受 socket，解除阻塞中的 recv／send。
+            if self.ntrip_caster:
+                self._cleanup_component(
+                    'NTRIP 用戶端 socket',
+                    self.ntrip_caster.close_client_connections,
+                )
+            self._cleanup_component(
+                '連線管理器',
+                lambda: get_connection_manager().close_all_connections(),
+            )
+
+            # 5. 完成 NTRIP 執行緒池關閉，再有限等待 listener 執行緒。
+            if self.ntrip_caster:
+                self._cleanup_component('NTRIP 伺服器', self.ntrip_caster.stop)
+            self._join_thread(self.ntrip_thread, 'NTRIP listener 執行緒')
+            self._join_thread(self.web_thread, 'Web listener 執行緒')
+
             logger.log_system_event('所有服務已關閉')
-            
-        except Exception as e:
-            logger.log_error(f'關閉服務時發生例外：{e}')
         finally:
-            # 确保停止标志位被重置（虽然程序即将退出）
             self.stopping = False
+            self.stopped = True
+            self.shutdown_complete.set()
+
+        return True
 
 # 全局服务器实例
 server = None

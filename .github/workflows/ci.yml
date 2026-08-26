@@ -142,6 +142,10 @@ jobs:
         shell: pwsh
         run: python -m unittest discover -s tests -p "test_ntrip_download_lifecycle.py"
 
+      - name: Run Windows graceful shutdown tests
+        shell: pwsh
+        run: python -m unittest discover -s tests -p "test_graceful_shutdown.py"
+
   deployment-static:
     name: GNU Make and Docker Compose static validation
     runs-on: ubuntu-latest

@@ -1789,7 +1789,7 @@ function getSettingsContent() {
 
             <div class="settings-section">
                 <h4>系統控制</h4>
-                <button onclick="restartProgram()" class="btn btn-warning" style="background-color: #f39c12; border-color: #f39c12;">重新啟動程式</button>
+                <button onclick="shutdownProgram()" class="btn btn-warning" style="background-color: #f39c12; border-color: #f39c12;">安全關閉程式</button>
             </div>
         </div>
     `;
@@ -3012,18 +3012,17 @@ async function removeMount(mount) {
         }
     }
     
-    async function restartProgram() {
+    async function shutdownProgram() {
         showConfirmDialog(
-        '確認重新啟動',
-        '確定要重新啟動程式嗎？重新啟動後所有連線都會中斷，請謹慎操作。',
+        '確認安全關閉',
+        '確定要安全關閉程式嗎？所有連線都會中斷，請謹慎操作。',
         async function() {
-            // Execute restart logic
-            await performRestart();
+            await performShutdown();
         }
     );
 }
 
-async function performRestart() {
+async function performShutdown() {
         
         try {
             const response = await fetch('/api/system/restart', {
@@ -3034,18 +3033,14 @@ async function performRestart() {
             });
             
             if (response.ok) {
-                showAlert('已送出程式重新啟動指令，系統將於 3 秒後重新啟動...', 'success');
-                // Refresh page after 3 seconds
-                setTimeout(() => {
-                    window.location.reload();
-                }, 3000);
+                showAlert('已送出安全關機指令；如需重新啟動，請由服務管理器執行。', 'success');
             } else {
                 const result = await response.json();
-                showAlert('重新啟動失敗：' + (result.error || '未知錯誤'), 'error');
+                showAlert('安全關機失敗：' + (result.error || '未知錯誤'), 'error');
             }
         } catch (error) {
-            // console.error('Failed to restart program:', error);
-            showAlert('無法重新啟動程式：' + error.message, 'error');
+            // console.error('Failed to shut down program:', error);
+            showAlert('無法安全關閉程式：' + error.message, 'error');
         }
     }
 
