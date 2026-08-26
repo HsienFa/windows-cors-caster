@@ -340,6 +340,31 @@ class GracefulShutdownTests(unittest.TestCase):
         self.assertEqual(server.shutdown_calls, 1)
         self.assertEqual(server.close_calls, 1)
 
+    def test_web_manager_initializes_threading_primitives(self):
+        web_module = sys.modules["src.web"]
+
+        with (
+            mock.patch.object(web_module.connection, "ConnectionManager"),
+            mock.patch.object(web_module, "SocketIO"),
+            mock.patch.object(web_module.WebManager, "_register_routes"),
+            mock.patch.object(web_module.WebManager, "_register_socketio_events"),
+            mock.patch.object(web_module.logger, "set_web_instance"),
+        ):
+            web_manager = web_module.WebManager(
+                db_manager=object(),
+                data_forwarder=object(),
+                start_time=0,
+            )
+
+        self.assertIsInstance(
+            web_manager._push_stop_event,
+            type(threading.Event()),
+        )
+        self.assertIsInstance(
+            web_manager._server_lock,
+            type(threading.Lock()),
+        )
+
     def test_windows_launcher_keeps_python_in_foreground_for_ctrl_c(self):
         launcher_path = PROJECT_ROOT / "start-windows.bat"
         launcher_bytes = launcher_path.read_bytes()
