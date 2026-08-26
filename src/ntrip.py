@@ -1669,6 +1669,8 @@ a=control:*
 
 class NTRIPCaster:
     """NTRIP Caster服务器 - 使用线程池处理高并发连接"""
+
+    THREAD_JOIN_TIMEOUT = 5.0
     
     def __init__(self, db_manager):
         self.server_socket = None
@@ -1676,9 +1678,14 @@ class NTRIPCaster:
         self.db_manager = db_manager
 
         self.thread_pool = None
+        self.connection_handler_thread = None
         self.connection_queue = Queue(maxsize=CONNECTION_QUEUE_SIZE)
         self.active_connections = 0
         self.connection_lock = threading.Lock()
+        self.client_socket_lock = threading.Lock()
+        self.client_sockets = set()
+        self.stop_lock = threading.Lock()
+        self.stopped = False
 
         self.total_connections = 0
         self.rejected_connections = 0
@@ -1727,13 +1734,18 @@ class NTRIPCaster:
         """主循环，接受客户端连接"""
         while self.running:
             try:
-                client_socket, client_address = self.server_socket.accept()
+                server_socket = self.server_socket
+                if server_socket is None:
+                    break
+                client_socket, client_address = server_socket.accept()
+                self._register_client_socket(client_socket)
                 
                 # 检查连接数限制
                 with self.connection_lock:
                     if self.active_connections >= MAX_CONNECTIONS:
                         log_warning(f"連線數已達上限 {MAX_CONNECTIONS}，拒絕連線 {client_address}")
-                        client_socket.close()
+                        self._close_client_socket(client_socket)
+                        self._unregister_client_socket(client_socket)
                         self.rejected_connections += 1
                         continue
 
@@ -1744,7 +1756,8 @@ class NTRIPCaster:
                     log_info(f"接受來自 {client_address} 的連線，佇列大小：{self.connection_queue.qsize()}，作用中連線：{self.active_connections}")
                 except Full:
                     log_warning(f"連線佇列已滿，拒絕連線 {client_address}")
-                    client_socket.close()
+                    self._close_client_socket(client_socket)
+                    self._unregister_client_socket(client_socket)
                     self.rejected_connections += 1
             
             except socket.error as e:
@@ -1752,18 +1765,23 @@ class NTRIPCaster:
                     log_error(f"接受連線時發生例外：{e}", exc_info=True)
                 break
             except Exception as e:
-                log_error(f"主迴圈發生例外：{e}", exc_info=True)
+                if self.running:
+                    log_error(f"主迴圈發生例外：{e}", exc_info=True)
                 break
     
     def _start_connection_handler(self):
         """启动连接处理器线程"""
-        handler_thread = Thread(target=self._connection_handler, daemon=True)
-        handler_thread.start()
+        self.connection_handler_thread = Thread(
+            target=self._connection_handler,
+            daemon=True,
+        )
+        self.connection_handler_thread.start()
         log_debug("连接处理器已启动")
     
     def _connection_handler(self):
         """连接处理器，从队列中取出连接并提交给线程池"""
         while self.running:
+            client_socket = None
             try:
                 
                 client_socket, client_address = self.connection_queue.get(timeout=1.0)
@@ -1772,6 +1790,8 @@ class NTRIPCaster:
 
                 with self.connection_lock:
                     self.active_connections += 1
+
+                client_socket = None
                 
                 log_info(f"連線 {client_address} 已提交至執行緒集區處理")
                 
@@ -1779,7 +1799,11 @@ class NTRIPCaster:
                 
                 continue
             except Exception as e:
-                log_error(f"連線處理器發生例外：{e}", exc_info=True)
+                if client_socket is not None:
+                    self._close_client_socket(client_socket)
+                    self._unregister_client_socket(client_socket)
+                if self.running:
+                    log_error(f"連線處理器發生例外：{e}", exc_info=True)
     
     def _handle_client_connection(self, client_socket, client_address):
         """处理单个客户端连接"""
@@ -1795,9 +1819,9 @@ class NTRIPCaster:
                 self.active_connections -= 1
             
             try:
-                client_socket.close()
-            except:
-                pass
+                self._close_client_socket(client_socket)
+            finally:
+                self._unregister_client_socket(client_socket)
             
             log_info(f"用戶端連線 {client_address} 處理完成，作用中連線：{self.active_connections}")
     
@@ -1823,34 +1847,94 @@ class NTRIPCaster:
             f"累計連線：{stats['total_connections']}，拒絕：{stats['rejected_connections']}"
         )
     
-    def stop(self):
-        """停止NTRIP服务器"""
-        log_system_event('正在關閉 NTRIP 伺服器')
-        
+    def _register_client_socket(self, client_socket):
+        with self.client_socket_lock:
+            self.client_sockets.add(client_socket)
+
+    def _unregister_client_socket(self, client_socket):
+        with self.client_socket_lock:
+            was_registered = client_socket in self.client_sockets
+            self.client_sockets.discard(client_socket)
+        return was_registered
+
+    @staticmethod
+    def _close_client_socket(client_socket):
+        try:
+            client_socket.shutdown(socket.SHUT_RDWR)
+        except (OSError, AttributeError, ValueError):
+            pass
+        try:
+            client_socket.close()
+        except (OSError, AttributeError, ValueError):
+            pass
+
+    def stop_accepting(self):
+        """停止 accept 新連線並關閉 listener；可安全重複呼叫。"""
         self.running = False
-        
-        if self.server_socket:
-            try:
-                self.server_socket.close()
-            except:
-                pass
-        
-        if self.thread_pool:
-            logger.log_system_event("正在關閉執行緒集區...")
-            
-            self.thread_pool.shutdown(wait=True)
-            log_system_event("執行緒集區已關閉")
-        
+        server_socket = self.server_socket
+        self.server_socket = None
+        if server_socket is not None:
+            self._close_client_socket(server_socket)
+
+    def close_client_connections(self):
+        """關閉所有已 accept 的 socket，使阻塞 handler 立即返回。"""
+        with self.client_socket_lock:
+            client_sockets = list(self.client_sockets)
+            self.client_sockets.clear()
+        for client_socket in client_sockets:
+            self._close_client_socket(client_socket)
+
+    def _close_queued_connections(self):
         while not self.connection_queue.empty():
             try:
                 client_socket, client_address = self.connection_queue.get_nowait()
-                client_socket.close()
+                if self._unregister_client_socket(client_socket):
+                    self._close_client_socket(client_socket)
                 log_debug(f"清理队列中的连接: {client_address}")
             except Empty:
                 break
             except Exception as e:
                 log_error(f"清理連線佇列時發生例外：{e}", exc_info=True)
-        
-        
+
+    def _shutdown_thread_pool(self):
+        thread_pool = self.thread_pool
+        self.thread_pool = None
+        if thread_pool is None:
+            return
+
+        logger.log_system_event("正在關閉執行緒集區...")
+        worker_threads = list(getattr(thread_pool, '_threads', ()))
+        thread_pool.shutdown(wait=False, cancel_futures=True)
+
+        deadline = time.monotonic() + self.THREAD_JOIN_TIMEOUT
+        for worker_thread in worker_threads:
+            remaining = max(0.0, deadline - time.monotonic())
+            worker_thread.join(timeout=remaining)
+
+        alive_workers = [thread for thread in worker_threads if thread.is_alive()]
+        if alive_workers:
+            log_warning(
+                f"仍有 {len(alive_workers)} 個 NTRIP 工作執行緒未在時限內結束"
+            )
+        else:
+            log_system_event("執行緒集區已關閉")
+
+    def stop(self):
+        """完整停止 NTRIP listener、連線處理器、socket 與執行緒池。"""
+        with self.stop_lock:
+            if self.stopped:
+                return
+            self.stopped = True
+
+        log_system_event('正在關閉 NTRIP 伺服器')
+        self.stop_accepting()
+        self.close_client_connections()
+        self._close_queued_connections()
+
+        if self.connection_handler_thread and self.connection_handler_thread.is_alive():
+            self.connection_handler_thread.join(timeout=self.THREAD_JOIN_TIMEOUT)
+
+        self._shutdown_thread_pool()
+
         log_system_event(f'NTRIP 伺服器已停止 - 總連線數：{self.total_connections}，拒絕連線數：{self.rejected_connections}')
         log_system_event('NTRIP 伺服器已關閉')

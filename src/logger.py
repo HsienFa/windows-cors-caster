@@ -307,13 +307,13 @@ class NTRIPLogger:
     def shutdown(self):
         """关闭日志系统"""
         for logger in self._loggers.values():
-            for handler in logger.handlers:
+            for handler in list(logger.handlers):
                 handler.close()
                 logger.removeHandler(handler)
         
         
         root_logger = logging.getLogger()
-        for handler in root_logger.handlers:
+        for handler in list(root_logger.handlers):
             handler.close()
             root_logger.removeHandler(handler)
 
