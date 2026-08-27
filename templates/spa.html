@@ -28,6 +28,12 @@
         * {
             transition: all 0.3s cubic-bezier(0.4, 0, 0.2, 1);
         }
+
+        /* OpenLayers 會自行更新 transform；避免全域動畫干擾地圖渲染。 */
+        #map .ol-viewport,
+        #map .ol-viewport * {
+            transition: none !important;
+        }
         
         /* 页面加载动画 */
         @keyframes fadeInUp {

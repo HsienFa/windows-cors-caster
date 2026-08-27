@@ -455,7 +455,7 @@ function displayStationInfo(stationData) {
     const stationInfoDiv = document.getElementById('station-info');
     const stationMountName = stationData.mount_name || stationData.mount || currentMountName || stationData.name || '未知';
     currentMountName = stationMountName;
-    currentStationName = stationData.station_name || stationData.site_name || stationData.name || stationData.id || stationMountName;
+    currentStationName = resolveStationDisplayName(stationData, stationMountName);
     stationInfoDiv.innerHTML = `
         <div class="station-details">
             <!-- 第一行：基本信息 -->
@@ -721,10 +721,12 @@ function initializeOpenStreetMap() {
     try {
         const layer = createOSMLayer();
         osmMarkerLayer = new ol.layer.Vector({
-            source: new ol.source.Vector()
+            source: new ol.source.Vector(),
+            zIndex: 10
         });
         osmRoverLayer = new ol.layer.Vector({
-            source: new ol.source.Vector()
+            source: new ol.source.Vector(),
+            zIndex: 20
         });
         currentMap = new ol.Map({
             target: mapContainer,
@@ -846,13 +848,28 @@ function createOSMLayer() {
     return new ol.layer.Tile({
         source: tileSource,
         preload: 1,
-        useInterimTilesOnError: true
+        useInterimTilesOnError: true,
+        zIndex: 0
     });
 }
 
 function isCurrentMountOnline(mountName) {
     if (!mountName || !window.onlineMounts) return false;
     return Object.prototype.hasOwnProperty.call(window.onlineMounts, mountName);
+}
+
+function resolveStationDisplayName(stationData = {}, fallbackMountName = null) {
+    const mountName = stationData.mount_name
+        || stationData.mount
+        || fallbackMountName;
+    return stationData.station_name
+        || stationData.site_name
+        || stationData.display_name
+        || stationData.name
+        || mountName
+        || stationData.station_id
+        || stationData.id
+        || '未知基站';
 }
 
 function createMarkerDetails(latitude, longitude, mountName) {
@@ -901,6 +918,7 @@ function updateOpenStreetMapMarker(details, isInitialMarking) {
         isStationMarker: true
     });
     markerFeature.setStyle(new ol.style.Style({
+        zIndex: 10,
         image: new ol.style.Icon({
             src: 'data:image/svg+xml;base64,' + btoa(`
                 <svg xmlns="http://www.w3.org/2000/svg" width="32" height="32" viewBox="0 0 32 32">
@@ -918,6 +936,7 @@ function updateOpenStreetMapMarker(details, isInitialMarking) {
         name: '基站名稱標籤'
     });
     textFeature.setStyle(new ol.style.Style({
+        zIndex: 11,
         text: new ol.style.Text({
             text: details.name,
             font: 'bold 16px Arial',
@@ -1129,18 +1148,32 @@ function updateOpenStreetMapRoverFeature(feature, rover) {
         Number(rover.longitude),
         Number(rover.latitude)
     ]));
-    feature.setStyle(new ol.style.Style({
-        image: new ol.style.Circle({
-            radius: 11,
-            fill: new ol.style.Fill({ color: roverMarkerColor(rover) }),
-            stroke: new ol.style.Stroke({ color: '#ffffff', width: 3 })
+    feature.setStyle([
+        new ol.style.Style({
+            zIndex: 20,
+            image: new ol.style.Circle({
+                radius: 11,
+                fill: new ol.style.Fill({ color: roverMarkerColor(rover) }),
+                stroke: new ol.style.Stroke({ color: '#ffffff', width: 3 })
+            }),
+            text: new ol.style.Text({
+                text: 'R',
+                font: 'bold 12px Arial',
+                fill: new ol.style.Fill({ color: '#ffffff' })
+            })
         }),
-        text: new ol.style.Text({
-            text: 'R',
-            font: 'bold 12px Arial',
-            fill: new ol.style.Fill({ color: '#ffffff' })
+        new ol.style.Style({
+            zIndex: 21,
+            text: new ol.style.Text({
+                text: String(rover.username || 'Rover'),
+                font: 'bold 13px Arial',
+                textAlign: 'center',
+                offsetY: 25,
+                fill: new ol.style.Fill({ color: '#1f2937' }),
+                stroke: new ol.style.Stroke({ color: '#ffffff', width: 4 })
+            })
         })
-    }));
+    ]);
 }
 
 function syncOpenStreetMapRovers(rovers) {
@@ -2300,7 +2333,7 @@ socket.on('rtcm_realtime_data', function(data) {
                 if (data.latitude && data.longitude) {
                     // console.log(`收到位置信息: ${data.latitude}, ${data.longitude}`);
                     currentMountName = data.mount_name || data.mount || currentMountName;
-                    currentStationName = data.station_name || data.site_name || currentStationName || currentMountName;
+                    currentStationName = resolveStationDisplayName(data, currentMountName);
                     
                     if (!currentMap && currentPage === 'monitor') {
                         initializeMap();
@@ -2384,9 +2417,11 @@ socket.on('rtcm_realtime_data', function(data) {
                     // 如果还是空状态，先创建基础结构
                     // console.log('[地理信息调试] 检测到empty-state，创建基础结构');
                     const stationData = {
-                        name: data.mount_name || data.mount || '未知',
+                        name: data.name || null,
                         mount_name: data.mount_name || data.mount || currentMountName,
-                        station_name: data.station_name || data.site_name || data.station_id || '未知基站',
+                        station_name: data.station_name || null,
+                        site_name: data.site_name || null,
+                        display_name: data.display_name || null,
                         id: data.station_id || '未知',
                         country: data.country || '未知',
                         city: data.city || '未知',
@@ -2421,7 +2456,7 @@ socket.on('rtcm_realtime_data', function(data) {
                     if (data.station_id !== undefined) {
                         // console.log('[地理信息调试] 更新基准站ID:', data.station_id);
                         updateElement('station-id', data.station_id.toString());
-                        currentStationName = data.station_name || data.site_name || data.station_id.toString();
+                        currentStationName = resolveStationDisplayName(data, currentMountName);
                     }
                     
                     
@@ -2430,7 +2465,7 @@ socket.on('rtcm_realtime_data', function(data) {
                         
                         // 存储当前挂载点名称
                         currentMountName = data.mount_name || data.mount || currentMountName;
-                        currentStationName = data.station_name || data.site_name || currentStationName || currentMountName;
+                        currentStationName = resolveStationDisplayName(data, currentMountName);
                         
                         
                         if (!currentMap && currentPage === 'monitor') {

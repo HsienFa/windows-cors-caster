@@ -85,6 +85,9 @@ class RoverFrontendTests(unittest.TestCase):
                 filtered: state.filterByUsername([
                     {{username: 'Alpha'}}, {{username: 'Charlie'}}
                 ], 'alp').map(item => item.username),
+                fixedHasMarker: state.hasMarkerPosition({{
+                    ...base, connection_id: 'fixed', gga_fix_quality: 4
+                }}),
                 summary: state.summarize([
                     {{...base, gga_fix_quality: 4}},
                     {{...base, gga_fix_quality: 5}},
@@ -117,6 +120,7 @@ class RoverFrontendTests(unittest.TestCase):
         )
         self.assertEqual(result["markerCount"], 0)
         self.assertEqual(result["filtered"], ["Alpha"])
+        self.assertTrue(result["fixedHasMarker"])
         self.assertEqual(
             result["summary"],
             {"online": 5, "valid": 3, "fixed": 1, "float": 1,
@@ -172,6 +176,94 @@ class RoverFrontendTests(unittest.TestCase):
         self.assertIn("osmMarkerLayer.getSource()", station_source)
         self.assertNotIn("osmRoverLayer.getSource().clear", station_source)
 
+    def test_osm_layers_and_styles_prioritize_rover_at_same_coordinate(self):
+        initialization = self.app_source.split(
+            "function initializeOpenStreetMap", 1
+        )[1].split("function initializeGoogleMap", 1)[0]
+        self.assertIn("zIndex: 10", initialization)
+        self.assertIn("zIndex: 20", initialization)
+
+        osm_layer = self.app_source.split(
+            "function createOSMLayer", 1
+        )[1].split("function isCurrentMountOnline", 1)[0]
+        self.assertIn("zIndex: 0", osm_layer)
+
+        station_style = self.app_source.split(
+            "function updateOpenStreetMapMarker", 1
+        )[1].split("function openGoogleMarkerInfo", 1)[0]
+        self.assertIn("zIndex: 10", station_style)
+        self.assertIn("zIndex: 11", station_style)
+        self.assertIn("offsetY: -25", station_style)
+
+        rover_style = self.app_source.split(
+            "function updateOpenStreetMapRoverFeature", 1
+        )[1].split("function syncOpenStreetMapRovers", 1)[0]
+        self.assertIn("zIndex: 20", rover_style)
+        self.assertIn("zIndex: 21", rover_style)
+        self.assertIn("text: 'R'", rover_style)
+        self.assertIn("text: String(rover.username || 'Rover')", rover_style)
+        self.assertIn("offsetY: 25", rover_style)
+        self.assertIn("stroke: new ol.style.Stroke", rover_style)
+        self.assertNotIn("innerHTML", rover_style)
+
+    def test_station_label_priority_prefers_mount_name_over_station_id(self):
+        node = (
+            os.environ.get("NODE_BINARY")
+            or shutil.which("node")
+            or shutil.which("node.exe")
+        )
+        if node is None:
+            self.skipTest("Node.js is required for station label tests")
+
+        start = self.app_source.index("function resolveStationDisplayName")
+        end = self.app_source.index("function createMarkerDetails", start)
+        resolver_source = self.app_source[start:end]
+        script = f"""
+            {resolver_source}
+            console.log(JSON.stringify([
+                resolveStationDisplayName({{
+                    station_name: 'Station', site_name: 'Site',
+                    display_name: 'Display', mount_name: 'base', station_id: 475
+                }}),
+                resolveStationDisplayName({{
+                    site_name: 'Site', display_name: 'Display',
+                    mount_name: 'base', station_id: 475
+                }}),
+                resolveStationDisplayName({{
+                    display_name: 'Display', mount_name: 'base', station_id: 475
+                }}),
+                resolveStationDisplayName({{
+                    name: 'Configured', mount_name: 'base', station_id: 475
+                }}),
+                resolveStationDisplayName({{mount_name: 'base', station_id: 475}}),
+                resolveStationDisplayName({{station_id: 475}})
+            ]));
+        """
+        completed = subprocess.run(
+            [node, "-e", script],
+            cwd=PROJECT_ROOT,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            check=True,
+        )
+        self.assertEqual(
+            json.loads(completed.stdout),
+            ["Station", "Site", "Display", "Configured", "base", 475],
+        )
+
+    def test_rover_polling_updates_markers_without_recentering(self):
+        polling_source = self.app_source.split(
+            "async function fetchRoverStatus", 1
+        )[1].split("function updateRoverSummary", 1)[0]
+        rover_sync_source = self.app_source.split(
+            "function updateOpenStreetMapRoverFeature", 1
+        )[1].split("// SATELLITE", 1)[0]
+        for source in (polling_source, rover_sync_source):
+            self.assertNotIn("setCenter(", source)
+            self.assertNotIn("setZoom(", source)
+            self.assertNotIn(".fit(", source)
+
     def test_osm_layer_uses_bounded_preload_and_short_transition(self):
         osm_source = self.app_source.split(
             "function createOSMLayer", 1
@@ -182,6 +274,25 @@ class RoverFrontendTests(unittest.TestCase):
         self.assertIn("useInterimTilesOnError: true", osm_source)
         self.assertNotIn("url:", osm_source)
         self.assertIn("OpenStreetMap contributors", osm_source)
+
+    def test_openlayers_subtree_is_excluded_from_global_css_transition(self):
+        self.assertIn(
+            "* {\n            transition: all 0.3s "
+            "cubic-bezier(0.4, 0, 0.2, 1);\n        }",
+            self.template_source,
+        )
+        openlayers_rule = self.template_source.split(
+            "/* OpenLayers 會自行更新 transform", 1
+        )[1].split("/* 页面加载动画 */", 1)[0]
+        self.assertIn("#map .ol-viewport,", openlayers_rule)
+        self.assertIn("#map .ol-viewport *", openlayers_rule)
+        self.assertIn("transition: none !important;", openlayers_rule)
+        self.assertNotIn("#map *", openlayers_rule)
+        self.assertNotIn(".gm-style", openlayers_rule)
+        self.assertIn(
+            "transition: transform 0.2s ease, box-shadow 0.2s ease;",
+            self.template_source,
+        )
 
     def test_existing_station_markers_coverage_and_fallback_remain_intact(self):
         osm_station = self.app_source.split(
