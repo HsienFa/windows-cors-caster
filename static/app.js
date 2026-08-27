@@ -948,8 +948,8 @@ function updateOpenStreetMapMarker(details, isInitialMarking) {
     source.addFeature(textFeature);
 
     [
-        [20000, 'rgba(21, 101, 192, 0.15)'],
-        [50000, 'rgba(66, 165, 245, 0.2)']
+        [5000, 'rgba(21, 101, 192, 0.14)'],
+        [10000, 'rgba(66, 165, 245, 0.08)']
     ].forEach(([radius, color]) => {
         const coverageCircle = new ol.Feature({
             geometry: new ol.geom.Circle(center, radius)
@@ -1004,17 +1004,17 @@ function updateGoogleMapMarker(details, isInitialMarking) {
             new google.maps.Circle({
                 map: currentMap,
                 center: position,
-                radius: 20000,
+                radius: 5000,
                 fillColor: '#1565c0',
-                fillOpacity: 0.15,
+                fillOpacity: 0.14,
                 strokeOpacity: 0
             }),
             new google.maps.Circle({
                 map: currentMap,
                 center: position,
-                radius: 50000,
+                radius: 10000,
                 fillColor: '#42a5f5',
-                fillOpacity: 0.2,
+                fillOpacity: 0.08,
                 strokeOpacity: 0
             })
         ];
@@ -2190,6 +2190,17 @@ function getMonitorContent() {
                                 地圖服務暫時無法使用；其他管理功能仍可正常使用。
                             </div>
                             <div id="map-marker-popup" class="map-marker-popup" hidden></div>
+                        </div>
+                        <div class="map-reference-legend" aria-label="單基站距離參考圈說明">
+                            <div class="map-reference-item">
+                                <span class="map-reference-swatch map-reference-swatch-5" aria-hidden="true"></span>
+                                <span><strong>5 km</strong>：單基站距離參考</span>
+                            </div>
+                            <div class="map-reference-item">
+                                <span class="map-reference-swatch map-reference-swatch-10" aria-hidden="true"></span>
+                                <span><strong>10 km</strong>：單基站較遠距離參考</span>
+                            </div>
+                            <p class="map-reference-note">距離參考圈，非 RTK 固定解或精度保證範圍</p>
                         </div>
                     </div>
                 </div>
