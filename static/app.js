@@ -949,7 +949,7 @@ function updateOpenStreetMapMarker(details, isInitialMarking) {
 
     [
         [5000, 'rgba(21, 101, 192, 0.14)'],
-        [10000, 'rgba(66, 165, 245, 0.08)']
+        [10000, 'rgba(66, 165, 245, 0.12)']
     ].forEach(([radius, color]) => {
         const coverageCircle = new ol.Feature({
             geometry: new ol.geom.Circle(center, radius)
@@ -1014,7 +1014,7 @@ function updateGoogleMapMarker(details, isInitialMarking) {
                 center: position,
                 radius: 10000,
                 fillColor: '#42a5f5',
-                fillOpacity: 0.08,
+                fillOpacity: 0.12,
                 strokeOpacity: 0
             })
         ];
@@ -2191,16 +2191,16 @@ function getMonitorContent() {
                             </div>
                             <div id="map-marker-popup" class="map-marker-popup" hidden></div>
                         </div>
-                        <div class="map-reference-legend" aria-label="單基站距離參考圈說明">
+                        <div class="map-reference-legend" aria-label="單基站使用參考範圍說明">
                             <div class="map-reference-item">
                                 <span class="map-reference-swatch map-reference-swatch-5" aria-hidden="true"></span>
-                                <span><strong>5 km</strong>：單基站距離參考</span>
+                                <span><strong>5 km</strong>：單基站使用參考範圍</span>
                             </div>
                             <div class="map-reference-item">
                                 <span class="map-reference-swatch map-reference-swatch-10" aria-hidden="true"></span>
-                                <span><strong>10 km</strong>：單基站較遠距離參考</span>
+                                <span><strong>10 km</strong>：單基站延伸使用參考範圍</span>
                             </div>
-                            <p class="map-reference-note">距離參考圈，非 RTK 固定解或精度保證範圍</p>
+                            <p class="map-reference-note">※ 此範圍僅供使用參考，非定位精度保證。</p>
                         </div>
                     </div>
                 </div>

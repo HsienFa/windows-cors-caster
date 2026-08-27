@@ -300,7 +300,7 @@ class RoverFrontendTests(unittest.TestCase):
         )[1].split("function openGoogleMarkerInfo", 1)[0]
         self.assertIn("isStationMarker: true", osm_station)
         self.assertIn("[5000, 'rgba(21, 101, 192, 0.14)']", osm_station)
-        self.assertIn("[10000, 'rgba(66, 165, 245, 0.08)']", osm_station)
+        self.assertIn("[10000, 'rgba(66, 165, 245, 0.12)']", osm_station)
         self.assertNotIn("[20000,", osm_station)
         self.assertNotIn("[50000,", osm_station)
         self.assertIn("populateMarkerDetails(popupElement, details)", osm_station)
@@ -311,6 +311,9 @@ class RoverFrontendTests(unittest.TestCase):
         self.assertIn("new google.maps.Circle", google_station)
         self.assertIn("radius: 5000", google_station)
         self.assertIn("radius: 10000", google_station)
+        self.assertIn("fillOpacity: 0.14", google_station)
+        self.assertIn("fillOpacity: 0.12", google_station)
+        self.assertNotIn("fillOpacity: 0.08", google_station)
         self.assertNotIn("radius: 20000", google_station)
         self.assertNotIn("radius: 50000", google_station)
         self.assertIn("openGoogleMarkerInfo()", google_station)
@@ -319,12 +322,13 @@ class RoverFrontendTests(unittest.TestCase):
         self.assertIn("fallbackToOpenStreetMap(", self.app_source)
 
     def test_reference_ring_legend_is_explicitly_not_an_rtk_guarantee(self):
-        self.assertIn("5 km</strong>：單基站距離參考", self.app_source)
-        self.assertIn("10 km</strong>：單基站較遠距離參考", self.app_source)
-        self.assertIn("距離參考圈，非 RTK 固定解或精度保證範圍", self.app_source)
+        self.assertIn("5 km</strong>：單基站使用參考範圍", self.app_source)
+        self.assertIn("10 km</strong>：單基站延伸使用參考範圍", self.app_source)
+        self.assertIn("※ 此範圍僅供使用參考，非定位精度保證。", self.app_source)
         self.assertNotIn("覆蓋範圍", self.app_source)
         self.assertNotIn("有效範圍", self.app_source)
         self.assertIn(".map-reference-legend", self.template_source)
+        self.assertIn("background: rgba(66, 165, 245, 0.12)", self.template_source)
 
     def test_map_center_threshold_remains_50_km(self):
         position_update = self.app_source.split(
