@@ -5,9 +5,10 @@ import time
 import json
 import socket
 import threading
+import uuid
 from threading import Lock, RLock, Thread
 from collections import defaultdict, deque
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Dict, List, Optional, Any
 from dataclasses import dataclass, field, asdict
 
@@ -16,6 +17,9 @@ from . import logger
 from .logger import log_system_event, log_error, log_warning, log_info, log_debug
 from .network_utils import inspect_established_remote_ips
 from .rtcm2_manager import parser_manager as rtcm_manager  # 导入RTCM2解析管理器
+
+
+ROVER_GGA_FRESHNESS_SECONDS = 30.0
 
 @dataclass
 class MountInfo:
@@ -404,7 +408,7 @@ class ConnectionManager:
     def add_user_connection(self, username, mount_name, ip_address, user_agent="", protocol_version="1.0", client_socket=None):
         """添加用户连接"""
         with self.user_lock:
-            connection_id = f"{username}_{mount_name}_{int(time.time())}"
+            connection_id = uuid.uuid4().hex
             
             socket_info = "无socket" if client_socket is None else f"端口:{getattr(client_socket, 'getpeername', lambda: ('未知', '未知'))()[1] if hasattr(client_socket, 'getpeername') else '未知'}"
             log_debug(f"创建用户连接 - 用户: {username}, 挂载点: {mount_name}, IP: {ip_address}, {socket_info}, User-Agent: {user_agent}")
@@ -420,7 +424,16 @@ class ConnectionManager:
                 'connect_datetime': datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
                 'last_activity': time.time(),
                 'bytes_sent': 0,
-                'client_socket': client_socket
+                'client_socket': client_socket,
+                'latitude': None,
+                'longitude': None,
+                'gga_fix_quality': None,
+                'satellites': None,
+                'hdop': None,
+                'altitude': None,
+                'last_gga_time': None,
+                'has_valid_position': False,
+                '_last_gga_timestamp': None,
             }
             
             if username not in self.online_users:
@@ -521,6 +534,89 @@ class ConnectionManager:
                 return False
             
             return True
+
+    def update_rover_gga(self, username, connection_id, gga_data, received_at=None):
+        """Update one live rover connection with normalized in-memory GGA data."""
+        if not connection_id or not isinstance(gga_data, dict):
+            return False
+
+        received_timestamp = time.time() if received_at is None else float(received_at)
+        received_time = datetime.fromtimestamp(
+            received_timestamp,
+            timezone.utc,
+        ).isoformat().replace('+00:00', 'Z')
+        gga_fields = (
+            'latitude',
+            'longitude',
+            'gga_fix_quality',
+            'satellites',
+            'hdop',
+            'altitude',
+        )
+
+        with self.user_lock:
+            for connection_info in self.online_users.get(username, []):
+                if connection_info.get('connection_id') != connection_id:
+                    continue
+                for field_name in gga_fields:
+                    connection_info[field_name] = gga_data.get(field_name)
+                connection_info['last_gga_time'] = received_time
+                connection_info['has_valid_position'] = bool(
+                    gga_data.get('has_valid_position', False)
+                )
+                connection_info['_last_gga_timestamp'] = received_timestamp
+                return True
+        return False
+
+    def get_rover_status(
+        self,
+        freshness_threshold=ROVER_GGA_FRESHNESS_SECONDS,
+        now=None,
+    ):
+        """Return a socket-free snapshot of every online rover connection."""
+        snapshot_time = time.time() if now is None else float(now)
+        threshold = max(0.0, float(freshness_threshold))
+        public_fields = (
+            'username',
+            'connection_id',
+            'mount_name',
+            'ip_address',
+            'user_agent',
+            'connect_datetime',
+            'latitude',
+            'longitude',
+            'gga_fix_quality',
+            'satellites',
+            'hdop',
+            'altitude',
+            'last_gga_time',
+            'has_valid_position',
+        )
+
+        with self.user_lock:
+            rover_status = []
+            for connections in self.online_users.values():
+                for connection_info in connections:
+                    last_gga_timestamp = connection_info.get('_last_gga_timestamp')
+                    if last_gga_timestamp is None:
+                        gga_age_seconds = None
+                    else:
+                        gga_age_seconds = max(
+                            0.0,
+                            snapshot_time - float(last_gga_timestamp),
+                        )
+                    item = {
+                        field_name: connection_info.get(field_name)
+                        for field_name in public_fields
+                    }
+                    item['gga_age_seconds'] = gga_age_seconds
+                    item['position_fresh'] = bool(
+                        item['has_valid_position']
+                        and gga_age_seconds is not None
+                        and gga_age_seconds <= threshold
+                    )
+                    rover_status.append(item)
+            return rover_status
     
     def is_mount_online(self, mount_name):
         """检查挂载点是否在线"""
@@ -897,6 +993,19 @@ def remove_user_connection(username, connection_id=None, mount_name=None):
 def update_user_activity(username, connection_id, bytes_sent=0):
     """更新用户活动"""
     return get_connection_manager().update_user_activity(username, connection_id, bytes_sent)
+
+def update_rover_gga(username, connection_id, gga_data, received_at=None):
+    """更新移動站 GGA 狀態。"""
+    return get_connection_manager().update_rover_gga(
+        username,
+        connection_id,
+        gga_data,
+        received_at,
+    )
+
+def get_rover_status(freshness_threshold=ROVER_GGA_FRESHNESS_SECONDS, now=None):
+    """取得所有線上移動站的 GGA 狀態快照。"""
+    return get_connection_manager().get_rover_status(freshness_threshold, now)
 
 def is_mount_online(mount_name):
     """检查挂载点是否在线"""

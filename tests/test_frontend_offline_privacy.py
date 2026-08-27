@@ -19,6 +19,7 @@ OPENLAYERS_CSS = '/static/vendor/openlayers/8.2.0/ol.css'
 OPENLAYERS_JS = '/static/vendor/openlayers/8.2.0/ol.js'
 SOCKET_IO_JS = '/static/vendor/socket.io-client/4.0.1/socket.io.min.js'
 APP_JS = '/static/app.js'
+ROVER_STATE_JS = '/static/rover-state.js'
 OPTIONAL_GOOGLE_SCRIPT = '{{ google_maps_script_url }}'
 
 VENDOR_SHA256 = {
@@ -68,10 +69,15 @@ class FrontendOfflinePrivacyTests(unittest.TestCase):
         self.assertIn(OPENLAYERS_CSS, self.assets.stylesheets)
         self.assertEqual(self.assets.scripts.count(OPENLAYERS_JS), 1)
         self.assertEqual(self.assets.scripts.count(SOCKET_IO_JS), 1)
+        self.assertEqual(self.assets.scripts.count(ROVER_STATE_JS), 1)
         self.assertEqual(self.assets.scripts.count(APP_JS), 1)
         self.assertEqual(self.assets.scripts.count(OPTIONAL_GOOGLE_SCRIPT), 1)
         self.assertLess(
             self.assets.scripts.index(SOCKET_IO_JS),
+            self.assets.scripts.index(APP_JS),
+        )
+        self.assertLess(
+            self.assets.scripts.index(ROVER_STATE_JS),
             self.assets.scripts.index(APP_JS),
         )
 
@@ -108,6 +114,9 @@ class FrontendOfflinePrivacyTests(unittest.TestCase):
             for path in VENDOR_RUNTIME_FILES
         )
         runtime_source += '\n' + self.template_source + '\n' + self.app_source
+        runtime_source += '\n' + (
+            PROJECT_ROOT / 'static' / 'rover-state.js'
+        ).read_text(encoding='utf-8')
 
         forbidden_domains = (
             'cdnjs.cloudflare.com',

@@ -1,6 +1,7 @@
 """NTRIP download handshake and RTCM forwarding lifecycle regressions."""
 
 import base64
+import contextlib
 import os
 import socket
 import sys
@@ -77,9 +78,10 @@ finally:
 
 
 class ControlledSocket:
-    def __init__(self, fail_handshake=False, request_data=b""):
+    def __init__(self, fail_handshake=False, request_data=b"", recv_items=None):
         self.fail_handshake = fail_handshake
         self.request_data = request_data
+        self.recv_items = list(recv_items or [])
         self.handshake_started = threading.Event()
         self.release_handshake = threading.Event()
         self.writes = []
@@ -98,9 +100,16 @@ class ControlledSocket:
         return 0
 
     def recv(self, size):
-        data = self.request_data
-        self.request_data = b""
-        return data
+        if self.request_data:
+            data = self.request_data
+            self.request_data = b""
+            return data
+        if self.recv_items:
+            item = self.recv_items.pop(0)
+            if isinstance(item, BaseException):
+                raise item
+            return item
+        return b""
 
     def send(self, data):
         raise AssertionError("download responses and RTCM must use sendall")
@@ -124,6 +133,33 @@ class ControlledSocket:
 
     def close(self):
         self.closed = True
+
+
+class BlockingRoverSocket(ControlledSocket):
+    def __init__(self):
+        super().__init__()
+        self.recv_started = threading.Event()
+        self.recv_released = threading.Event()
+
+    def recv(self, size):
+        self.recv_started.set()
+        self.recv_released.wait(2.0)
+        raise OSError(10038, "simulated socket shutdown")
+
+    def shutdown(self, how):
+        super().shutdown(how)
+        self.recv_released.set()
+
+    def close(self):
+        super().close()
+        self.recv_released.set()
+
+
+def nmea_sentence(payload):
+    checksum = 0
+    for character in payload.encode("ascii"):
+        checksum ^= character
+    return f"${payload}*{checksum:02X}\r\n".encode("ascii")
 
 
 class NtripDownloadLifecycleTests(unittest.TestCase):
@@ -169,13 +205,21 @@ class NtripDownloadLifecycleTests(unittest.TestCase):
         handler._keep_connection_alive = mock.Mock()
         return handler, client_socket, database
 
-    def _patch_lifecycle(self, add_side_effect=None, activate_side_effect=None):
+    def _patch_lifecycle(
+        self,
+        add_side_effect=None,
+        activate_side_effect=None,
+        update_gga_side_effect=None,
+    ):
         add_client = self.data_forwarder.add_client
         if add_side_effect is not None:
             add_client = add_side_effect
         activate = self.data_forwarder.activate_client
         if activate_side_effect is not None:
             activate = activate_side_effect
+        update_gga = self.manager.update_rover_gga
+        if update_gga_side_effect is not None:
+            update_gga = update_gga_side_effect
         return (
             mock.patch.object(
                 ntrip.connection,
@@ -201,6 +245,11 @@ class NtripDownloadLifecycleTests(unittest.TestCase):
                 ntrip.forwarder,
                 "remove_client",
                 side_effect=self.data_forwarder.remove_client,
+            ),
+            mock.patch.object(
+                ntrip.connection,
+                "update_rover_gga",
+                side_effect=update_gga,
             ),
         )
 
@@ -353,6 +402,220 @@ class NtripDownloadLifecycleTests(unittest.TestCase):
         handler._cleanup_download_connection()
         handler._cleanup_download_connection()
 
+        self.assertNotIn("TEST", self.data_forwarder.clients)
+        self.assertNotIn("test-rover", self.manager.online_users)
+
+    def test_connection_ids_are_unique_and_rover_freshness_expires(self):
+        first_id = self.manager.add_user_connection(
+            "test-rover",
+            "TEST",
+            "127.0.0.1",
+        )
+        second_id = self.manager.add_user_connection(
+            "test-rover",
+            "TEST",
+            "127.0.0.1",
+        )
+
+        self.assertNotEqual(first_id, second_id)
+        self.assertEqual(len(first_id), 32)
+        self.assertEqual(len(second_id), 32)
+        int(first_id, 16)
+        int(second_id, 16)
+
+        updated = self.manager.update_rover_gga(
+            "test-rover",
+            first_id,
+            {
+                "latitude": 25.0618933333,
+                "longitude": 121.6457533333,
+                "gga_fix_quality": 4,
+                "satellites": 20,
+                "hdop": 0.6,
+                "altitude": 50.2,
+                "has_valid_position": True,
+            },
+            received_at=100.0,
+        )
+
+        self.assertTrue(updated)
+        fresh = self.manager.get_rover_status(now=130.0)
+        stale = self.manager.get_rover_status(now=130.001)
+        first_fresh = next(item for item in fresh if item["connection_id"] == first_id)
+        first_stale = next(item for item in stale if item["connection_id"] == first_id)
+        second_status = next(item for item in fresh if item["connection_id"] == second_id)
+        self.assertEqual(first_fresh["last_gga_time"], "1970-01-01T00:01:40Z")
+        self.assertEqual(first_fresh["gga_age_seconds"], 30.0)
+        self.assertTrue(first_fresh["position_fresh"])
+        self.assertFalse(first_stale["position_fresh"])
+        self.assertIsNone(second_status["gga_age_seconds"])
+        self.assertFalse(second_status["has_valid_position"])
+        self.assertFalse(second_status["position_fresh"])
+        self.assertNotIn("client_socket", first_fresh)
+
+    def test_ntrip_1_initial_gga_is_processed_after_activation(self):
+        auth_header, _ = self._basic_header()
+        gga = nmea_sentence(
+            "GPGGA,123519,2503.7136,N,12138.7452,E,4,20,0.6,50.2,M,0.0,M,,"
+        )
+        request = (
+            "GET /base HTTP/1.0\r\n"
+            "Host: caster.example.invalid:2101\r\n"
+            "User-Agent: NTRIP rover/1.0\r\n"
+            f"Authorization: {auth_header}\r\n"
+            "\r\n"
+        ).encode("ascii") + gga
+        handler, client_socket, database = self._request_handler(
+            request.decode("ascii")
+        )
+
+        def update_after_activation(username, connection_id, gga_data, received_at=None):
+            self.assertTrue(client_socket.writes[0].startswith(b"ICY 200 OK\r\n"))
+            self.assertTrue(self.data_forwarder.clients["base"][0]["active"])
+            return self.manager.update_rover_gga(
+                username,
+                connection_id,
+                gga_data,
+                received_at,
+            )
+
+        patches = self._patch_lifecycle(
+            update_gga_side_effect=update_after_activation,
+        )
+        for patcher in patches:
+            patcher.start()
+            self.addCleanup(patcher.stop)
+
+        with mock.patch.object(ntrip.connection, "get_user_connection_count", return_value=0):
+            handler.handle_request()
+
+        self.assertEqual(handler.protocol_type, "ntrip1_0_http")
+        database.verify_download_user.assert_called_once()
+        status = self.manager.get_rover_status()[0]
+        self.assertEqual(status["gga_fix_quality"], 4)
+        self.assertTrue(status["has_valid_position"])
+        handler._cleanup_download_connection()
+
+    def test_ntrip_2_gga_header_is_processed_without_logging_position(self):
+        auth_header, _ = self._basic_header()
+        gga = nmea_sentence(
+            "GNGGA,123519,2503.7136,N,12138.7452,E,5,18,0.8,50.2,M,0.0,M,,"
+        ).decode("ascii").strip()
+        request = (
+            "GET /base HTTP/1.1\r\n"
+            "Host: caster.example.invalid:2101\r\n"
+            "User-Agent: NTRIP rover/2.0\r\n"
+            "Ntrip-Version: Ntrip/2.0\r\n"
+            f"Ntrip-GGA: {gga}\r\n"
+            f"Authorization: {auth_header}\r\n"
+            "\r\n"
+        )
+        handler, _, _ = self._request_handler(request)
+        logged_messages = []
+        patches = self._patch_lifecycle()
+        for patcher in patches:
+            patcher.start()
+            self.addCleanup(patcher.stop)
+
+        with (
+            mock.patch.object(ntrip.connection, "get_user_connection_count", return_value=0),
+            mock.patch.object(
+                ntrip,
+                "log_debug",
+                side_effect=lambda message, *args, **kwargs: logged_messages.append(str(message)),
+            ),
+        ):
+            handler.handle_request()
+
+        self.assertEqual(handler.protocol_type, "ntrip2_0")
+        status = self.manager.get_rover_status()[0]
+        self.assertEqual(status["gga_fix_quality"], 5)
+        self.assertNotIn(gga, "\n".join(logged_messages))
+        self.assertNotIn("2503.7136", "\n".join(logged_messages))
+        handler._cleanup_download_connection()
+
+    def test_streaming_gga_updates_state_and_no_gga_timeout_is_non_fatal(self):
+        gga = nmea_sentence(
+            "GPGGA,123519,2503.7136,N,12138.7452,E,4,20,0.6,50.2,M,0.0,M,,"
+        )
+        for recv_items, expected_updates in (
+            ([gga, b""], 1),
+            ([socket.timeout(), b""], 0),
+        ):
+            with self.subTest(expected_updates=expected_updates):
+                client_socket = ControlledSocket(recv_items=recv_items)
+                client_socket.release_handshake.set()
+                handler = self._make_handler(client_socket)
+                update_calls = []
+
+                def record_update(username, connection_id, gga_data, received_at=None):
+                    update_calls.append(gga_data)
+                    return self.manager.update_rover_gga(
+                        username,
+                        connection_id,
+                        gga_data,
+                        received_at,
+                    )
+
+                patches = self._patch_lifecycle(update_gga_side_effect=record_update)
+                with contextlib.ExitStack() as stack:
+                    for patcher in patches:
+                        stack.enter_context(patcher)
+                    handler.handle_download("/TEST", {})
+
+                self.assertEqual(len(update_calls), expected_updates)
+                self.assertTrue(client_socket.writes[0].startswith(b"ICY 200 OK\r\n"))
+
+    def test_gga_parser_failure_does_not_prevent_rtcm_send(self):
+        client_socket = ControlledSocket()
+        client_socket.release_handshake.set()
+        handler = self._make_handler(client_socket)
+        valid = nmea_sentence(
+            "GPGGA,123519,2503.7136,N,12138.7452,E,4,20,0.6,50.2,M,0.0,M,,"
+        )
+        invalid_checksum = valid[:-4] + (
+            b"00" if valid[-4:-2] != b"00" else b"FF"
+        ) + b"\r\n"
+        rtcm = b"\xd3\x00\x03\x01\x02\x03"
+
+        def receive_invalid_gga_then_broadcast():
+            self.assertEqual(handler._consume_rover_gga(invalid_checksum), 0)
+            self.data_forwarder.create_mount_buffer("TEST")
+            self.data_forwarder.mount_buffers["TEST"].append(rtcm)
+            self.data_forwarder._broadcast_data()
+            handler._cleanup_download_connection()
+
+        handler._keep_connection_alive = receive_invalid_gga_then_broadcast
+        patches = self._patch_lifecycle()
+        with contextlib.ExitStack() as stack:
+            for patcher in patches:
+                stack.enter_context(patcher)
+            handler.handle_download("/TEST", {})
+
+        self.assertTrue(client_socket.writes[0].startswith(b"ICY 200 OK\r\n"))
+        self.assertEqual(client_socket.writes[1], rtcm)
+
+    def test_socket_shutdown_releases_blocked_rover_recv(self):
+        client_socket = BlockingRoverSocket()
+        client_socket.release_handshake.set()
+        handler = self._make_handler(client_socket)
+        patches = self._patch_lifecycle()
+        for patcher in patches:
+            patcher.start()
+            self.addCleanup(patcher.stop)
+
+        worker = threading.Thread(
+            target=handler.handle_download,
+            args=("/TEST", {}),
+        )
+        worker.start()
+        self.assertTrue(client_socket.recv_started.wait(1.0))
+
+        client_socket.shutdown(socket.SHUT_RDWR)
+        client_socket.close()
+        worker.join(2.0)
+
+        self.assertFalse(worker.is_alive())
         self.assertNotIn("TEST", self.data_forwarder.clients)
         self.assertNotIn("test-rover", self.manager.online_users)
 

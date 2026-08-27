@@ -8,6 +8,7 @@ import threading
 import time
 import json
 import logging
+import math
 import psutil
 import re
 from datetime import datetime
@@ -30,6 +31,112 @@ from .rtcm2_manager import parser_manager as rtcm_manager
 
 # 全局服务器实例引用
 server_instance = None
+
+ROVER_API_FIELDS = (
+    'username',
+    'connection_id',
+    'mount_name',
+    'ip_address',
+    'user_agent',
+    'connect_datetime',
+    'latitude',
+    'longitude',
+    'gga_fix_quality',
+    'satellites',
+    'hdop',
+    'altitude',
+    'last_gga_time',
+    'has_valid_position',
+    'position_fresh',
+    'gga_age_seconds',
+)
+
+
+def _valid_coordinate(value, minimum, maximum):
+    try:
+        coordinate = float(value)
+    except (TypeError, ValueError, OverflowError):
+        return None
+    if not math.isfinite(coordinate) or not minimum <= coordinate <= maximum:
+        return None
+    return coordinate
+
+
+def _get_base_coordinates(mount_info):
+    """Return trusted in-memory base coordinates without reading persistence."""
+    if not isinstance(mount_info, dict):
+        return None, None
+
+    latitude = _valid_coordinate(mount_info.get('lat'), -90, 90)
+    longitude = _valid_coordinate(mount_info.get('lon'), -180, 180)
+    if latitude is not None and longitude is not None:
+        return latitude, longitude
+
+    if not mount_info.get('final_str_generated'):
+        return None, None
+    str_data = mount_info.get('str_data')
+    if not isinstance(str_data, str):
+        return None, None
+    fields = str_data.split(';')
+    if len(fields) < 11 or fields[0] != 'STR':
+        return None, None
+    latitude = _valid_coordinate(fields[9], -90, 90)
+    longitude = _valid_coordinate(fields[10], -180, 180)
+    return latitude, longitude
+
+
+def _distance_km(latitude, longitude, base_latitude, base_longitude):
+    """Calculate great-circle distance using the mean Earth radius."""
+    coordinates = (
+        _valid_coordinate(latitude, -90, 90),
+        _valid_coordinate(longitude, -180, 180),
+        _valid_coordinate(base_latitude, -90, 90),
+        _valid_coordinate(base_longitude, -180, 180),
+    )
+    if any(value is None for value in coordinates):
+        return None
+
+    rover_latitude, rover_longitude, base_latitude, base_longitude = map(
+        math.radians,
+        coordinates,
+    )
+    latitude_delta = base_latitude - rover_latitude
+    longitude_delta = base_longitude - rover_longitude
+    haversine = (
+        math.sin(latitude_delta / 2) ** 2
+        + math.cos(rover_latitude)
+        * math.cos(base_latitude)
+        * math.sin(longitude_delta / 2) ** 2
+    )
+    return 6371.0088 * 2 * math.asin(min(1.0, math.sqrt(haversine)))
+
+
+def _public_online_user_summary(online_users):
+    """Return counts only; never expose Rover connection identity or position."""
+    if not isinstance(online_users, dict):
+        return {'online_user_count': 0, 'connection_count': 0}
+    return {
+        'online_user_count': len(online_users),
+        'connection_count': sum(
+            len(connections)
+            for connections in online_users.values()
+            if isinstance(connections, (list, tuple))
+        ),
+    }
+
+
+def _public_system_stats(stats):
+    """Remove per-user identities from system statistics used by public UI."""
+    if not isinstance(stats, dict):
+        return {}
+    public_stats = dict(stats)
+    user_details = public_stats.pop('users', None)
+    public_stats['user_count'] = (
+        len(user_details)
+        if isinstance(user_details, (list, tuple, dict))
+        else 0
+    )
+    return public_stats
 
 def set_server_instance(server):
     """设置服务器实例"""
@@ -165,6 +272,11 @@ class WebManager:
         @self.app.route('/')
         def index():
             """主页 - SPA应用"""
+            if (
+                request.args.get('page') == 'monitor'
+                and not session.get('admin_logged_in')
+            ):
+                return redirect('/login?redirect=monitor')
             map_config = config.get_public_map_config()
             
             return self._load_template('spa.html', 
@@ -238,7 +350,7 @@ class WebManager:
                     
                     # 检查重定向参数
                     redirect_page = request.args.get('redirect')
-                    if redirect_page and redirect_page in ['users', 'mounts', 'settings']:
+                    if redirect_page and redirect_page in ['users', 'mounts', 'monitor', 'settings']:
                         return redirect(f'/?page={redirect_page}')
                     
                     return redirect(url_for('index'))
@@ -1054,6 +1166,49 @@ class WebManager:
             except Exception as e:
                 log_error(f"檢查掛載點線上狀態失敗：{e}")
                 return jsonify({'error': str(e)}), 500
+
+        @self.app.route('/api/rovers', methods=['GET'])
+        @self.require_login
+        def api_rovers():
+            """Return an authenticated, explicitly whitelisted rover snapshot."""
+            try:
+                manager = connection.get_connection_manager()
+                rover_snapshot = manager.get_rover_status()
+                online_mounts = manager.get_online_mounts()
+                rovers = []
+
+                for rover in rover_snapshot:
+                    item = {
+                        field_name: rover.get(field_name)
+                        for field_name in ROVER_API_FIELDS
+                    }
+                    base_latitude, base_longitude = _get_base_coordinates(
+                        online_mounts.get(item['mount_name'])
+                    )
+                    item['base_latitude'] = base_latitude
+                    item['base_longitude'] = base_longitude
+                    item['distance_to_base_km'] = None
+                    if item['has_valid_position']:
+                        item['distance_to_base_km'] = _distance_km(
+                            item['latitude'],
+                            item['longitude'],
+                            base_latitude,
+                            base_longitude,
+                        )
+                    rovers.append(item)
+
+                return jsonify({
+                    'success': True,
+                    'rovers': rovers,
+                    'total_count': len(rovers),
+                    'freshness_threshold_seconds': (
+                        connection.ROVER_GGA_FRESHNESS_SECONDS
+                    ),
+                    'timestamp': time.time(),
+                })
+            except Exception:
+                log_error("取得 Rover 狀態失敗", exc_info=True)
+                return jsonify({'error': '無法取得 Rover 狀態'}), 500
         
         @self.app.route('/api/system/stats')
         def api_system_stats():
@@ -1064,7 +1219,7 @@ class WebManager:
                 if server and hasattr(server, 'get_system_stats'):
                     stats = server.get_system_stats()
                 
-                    return jsonify(stats)
+                    return jsonify(_public_system_stats(stats))
                 else:
                     log_error("API 錯誤：無法取得伺服器執行個體或 get_system_stats 方法")
                     return jsonify({'error': '無法取得系統統計資料'}), 500
@@ -1162,8 +1317,10 @@ class WebManager:
             from flask import session
             client_id = session.get('sid', 'unknown')
             log_web_request('websocket', 'connect', client_id, 'WebSocket 用戶端連線')
-            # 将客户端加入到数据推送房间
+            # 公開 room 只接收非敏感摘要；管理員 room 可接收管理日誌。
             join_room('data_push')
+            if session.get('admin_logged_in'):
+                join_room('admin_data')
             if config.LOG_FREQUENT_STATUS:
                 log_info(f"用戶端 {client_id} 已加入 data_push 房間")
             emit('status', {'message': '連線成功'})
@@ -1221,7 +1378,7 @@ class WebManager:
                     stats = server.get_system_stats()
                     if stats:
                         emit('system_stats_update', {
-                            'stats': stats,
+                            'stats': _public_system_stats(stats),
                             'timestamp': time.time()
                         })
                     else:
@@ -1280,7 +1437,7 @@ class WebManager:
                     stats = server.get_system_stats()
                     if stats:
                         self.socketio.emit('system_stats_update', {
-                            'stats': stats,
+                            'stats': _public_system_stats(stats),
                             'timestamp': time.time()
                         }, to='data_push')
                         # 移除调试日志输出
@@ -1288,10 +1445,15 @@ class WebManager:
                 
                 # 推送在线用户列表
                 online_users = connection.get_connection_manager().get_online_users()
-                self.socketio.emit('online_users_update', {
-                    'users': online_users,
-                    'timestamp': time.time()
-                }, to='data_push')
+                online_user_summary = _public_online_user_summary(online_users)
+                self.socketio.emit(
+                    'online_users_update',
+                    {
+                        **online_user_summary,
+                        'timestamp': time.time(),
+                    },
+                    to='data_push',
+                )
                 # 移除调试日志输出
                 pass
                 
@@ -1325,7 +1487,7 @@ class WebManager:
                 'message': message,
                 'type': log_type,
                 'timestamp': time.time()
-            }, to='data_push')
+            }, to='admin_data')
         except Exception as e:
             log_error(f"推送日誌訊息失敗：{e}")
     

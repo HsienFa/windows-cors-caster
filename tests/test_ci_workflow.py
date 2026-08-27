@@ -66,6 +66,18 @@ class GitHubActionsWorkflowTests(unittest.TestCase):
             windows_job,
         )
         self.assertIn(
+            'python -m unittest discover -s tests -p "test_rover_gga.py"',
+            windows_job,
+        )
+        self.assertIn(
+            'python -m unittest discover -s tests -p "test_rover_web_api.py"',
+            windows_job,
+        )
+        self.assertIn(
+            'python -m unittest discover -s tests -p "test_rover_frontend.py"',
+            windows_job,
+        )
+        self.assertIn(
             'python -m unittest discover -s tests -p "test_graceful_shutdown.py"',
             windows_job,
         )
@@ -93,6 +105,9 @@ class GitHubActionsWorkflowTests(unittest.TestCase):
             "test_ci_workflow.py",
             "test_ntrip_upload_lifecycle.py",
             "test_ntrip_download_lifecycle.py",
+            "test_rover_gga.py",
+            "test_rover_web_api.py",
+            "test_rover_frontend.py",
             "test_graceful_shutdown.py",
         )
         for test_file in required_test_files:

@@ -28,6 +28,12 @@
         * {
             transition: all 0.3s cubic-bezier(0.4, 0, 0.2, 1);
         }
+
+        /* OpenLayers 會自行更新 transform；避免全域動畫干擾地圖渲染。 */
+        #map .ol-viewport,
+        #map .ol-viewport * {
+            transition: none !important;
+        }
         
         /* 页面加载动画 */
         @keyframes fadeInUp {
@@ -928,6 +934,79 @@
             width: 100%;
         }
 
+        .rover-summary-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(140px, 1fr));
+            gap: 0.85rem;
+        }
+
+        .rover-summary-item {
+            display: flex;
+            flex-direction: column;
+            gap: 0.25rem;
+            padding: 0.9rem 1rem;
+            border-left: 4px solid #546e7a;
+            border-radius: 8px;
+            background: #f8f9fa;
+            color: #455a64;
+        }
+
+        .rover-summary-item strong {
+            font-size: 1.5rem;
+            color: #263238;
+        }
+
+        .rover-summary-item.fixed { border-left-color: #2e7d32; }
+        .rover-summary-item.float { border-left-color: #ef8c00; }
+        .rover-summary-item.other { border-left-color: #00838f; }
+        .rover-summary-item.missing { border-left-color: #757575; }
+
+        .rover-table-header {
+            gap: 1rem;
+            flex-wrap: wrap;
+        }
+
+        .rover-filter-label {
+            display: flex;
+            align-items: center;
+            gap: 0.6rem;
+            color: #495057;
+            font-size: 0.9rem;
+        }
+
+        .rover-filter-label input {
+            min-width: 220px;
+            padding: 0.45rem 0.65rem;
+            border: 1px solid #ced4da;
+            border-radius: 6px;
+            background: white;
+        }
+
+        .rover-table-container {
+            overflow-x: auto;
+        }
+
+        .rover-table {
+            min-width: 1050px;
+        }
+
+        .rover-position-status {
+            font-weight: 700;
+        }
+
+        .rover-status-fixed { color: #2e7d32; }
+        .rover-status-float { color: #b25f00; }
+        .rover-status-other { color: #006d75; }
+        .rover-status-stale,
+        .rover-status-missing,
+        .rover-status-no-fix { color: #616161; }
+
+        .rover-table-empty {
+            padding: 1.5rem;
+            color: #6c757d;
+            text-align: center;
+        }
+
         .card-header {
             display: flex;
             justify-content: space-between;
@@ -1619,6 +1698,7 @@
     </div>
 
     <script src="/static/vendor/socket.io-client/4.0.1/socket.io.min.js"></script>
+    <script src="/static/rover-state.js"></script>
     <script src="/static/app.js"></script>
     {% if google_maps_script_url %}
     <script
