@@ -1,5 +1,16 @@
 # 第三方套件聲明
 
+## Python 執行階段套件
+
+### pynmeagps
+
+- 套件名稱：`pynmeagps`
+- 版本：`1.1.7`
+- 用途：驗證並解析 Rover 上行的 NMEA GGA sentence。
+- 來源：[官方原始碼儲存庫](https://github.com/semuconsulting/pynmeagps)
+- 授權：BSD 3-Clause
+- 授權全文：`third_party_licenses/pynmeagps-1.1.7-LICENSE`
+
 本專案將下列瀏覽器端套件固定版本保存在 `static/vendor/`，使管理介面的基本功能不必在執行階段從 CDN 下載資源。檔案均直接取自官方 npm Registry 發行封包，未修改內容。
 
 ## OpenLayers
@@ -43,7 +54,7 @@
 - 授權與服務條款：[Google Maps Platform Terms of Service](https://cloud.google.com/maps-platform/terms)
 - 本機保存：未保存 Google JavaScript、圖磚或其他 Google 地圖內容，因此沒有可記錄的本機檔案 SHA-256。
 - 備援：API 載入或驗證失敗時，自動切換至本機 OpenLayers 搭配 OpenStreetMap。
-- 資料範圍：瀏覽器會把地圖中心及基站座標交給 Google Maps JavaScript API 顯示；標記內容只使用基站名稱、掛載點、經緯度與線上狀態，不包含登入帳號、密碼或 Authorization 資料。
+- 資料範圍：瀏覽器會把地圖中心、基站座標，以及登入後管理頁需要顯示的 Rover 座標交給 Google Maps JavaScript API；不包含 NTRIP 帳密、管理員密碼、Authorization、原始 GGA、secret 或 session 資料。
 - 金鑰處理：金鑰只會成為官方 Maps JavaScript API script URL 的 `key` 查詢參數，不會放入 Git、JSON API、Socket.IO、日誌或畫面文字。
 - Demo Key 僅供測試。瀏覽器金鑰應限制為 Maps JavaScript API，並套用適當的 HTTP referrer 限制。
 - 本專案提供自己的[使用條款初稿](TERMS-OF-USE.md)與[隱私權政策初稿](PRIVACY-POLICY.md)。實際營運者必須在公開部署前填入自身資料並完成法律審查。

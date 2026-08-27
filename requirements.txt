@@ -14,8 +14,8 @@ setuptools>=78.1.1     # 修复 CVE-2025-47273, CVE-2024-6345
 
 # RTCM数据处理
 pyrtcm>=1.1.0          # RTCM消息解析库，支持MSM消息
+pynmeagps==1.1.7       # NMEA GGA解析与checksum验证（Python 3.11 / Windows）
 reverse-geocode>=1.6.0 # 离线反向地理编码库
 pyproj>=3.6.1          # 坐标转换库，当前版本无已知漏洞
-
 
 

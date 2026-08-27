@@ -21,6 +21,7 @@ from . import config
 from . import logger
 from .logger import log_debug, log_info, log_warning, log_error, log_critical, log_system_event
 from . import connection
+from .rover_gga import RoverGGAAccumulator
 
 
 DEBUG = config.DEBUG
@@ -90,6 +91,8 @@ class NTRIPHandler:
         self._download_cleanup_lock = threading.Lock()
         self._download_cleaned_up = False
         self.download_connection_id = None
+        self._initial_rover_data = b""
+        self._rover_gga_accumulator = RoverGGAAccumulator()
         
         self.client_socket.settimeout(config.SOCKET_TIMEOUT)
         
@@ -131,10 +134,18 @@ class NTRIPHandler:
             # 改为debug级别，避免频繁日志
             log_debug(f"=== 开始处理请求 {self.client_address} ===")
            
-            request_data = self.client_socket.recv(BUFFER_SIZE).decode('utf-8', errors='ignore')
-            if not request_data:
+            request_bytes = self.client_socket.recv(BUFFER_SIZE)
+            if not request_bytes:
                 log_debug(f"客户端 {self.client_address} 发送空请求")
                 return
+
+            request_data = request_bytes.decode('utf-8', errors='ignore')
+            header_bytes, separator, request_body = request_bytes.partition(b'\r\n\r\n')
+            header_data = header_bytes.decode('utf-8', errors='ignore')
+            request_method = header_data.split(None, 1)[0].upper() if header_data else ''
+            if separator and request_method == 'GET':
+                self._initial_rover_data = request_body
+                request_data = header_data
             
             raw_request = request_data[:200]
             sanitized_request = self._sanitize_request_for_logging(raw_request)
@@ -612,6 +623,8 @@ class NTRIPHandler:
                 
                 if 'authorization:' in line_lower:
                     sanitized_lines.append('已收到認證標頭')
+                elif 'ntrip-gga:' in line_lower:
+                    sanitized_lines.append('已收到 Ntrip-GGA 標頭')
                 else:
                     sanitized_lines.append(line)
             
@@ -1273,6 +1286,7 @@ a=control:*
                 self._cleanup_download_connection()
                 return
 
+            self._process_initial_rover_gga(headers)
             self._keep_connection_alive()
         
         except Exception as e:
@@ -1328,26 +1342,59 @@ a=control:*
             self._cleanup()
     
     def _keep_connection_alive(self):
-        """保持下载连接活跃）"""
+        """Read optional rover input while RTCM continues in the forwarder."""
         try:
-            
             while True:
-                time.sleep(5)  
-                
-                if hasattr(self, 'client_info') and self.client_info:
-                    
-                    try:
-                        
-                        self.client_socket.getsockopt(socket.SOL_SOCKET, socket.SO_ERROR)
-                    except (OSError, AttributeError):
-                        break
-                else:
+                client_info = getattr(self, 'client_info', None)
+                if not client_info or client_info.get('removed', False):
                     break
-        except:
-            
-            pass
+
+                try:
+                    rover_data = self.client_socket.recv(BUFFER_SIZE)
+                except socket.timeout:
+                    continue
+                except (OSError, AttributeError, ValueError):
+                    break
+
+                if not rover_data:
+                    break
+                self._consume_rover_gga(rover_data)
         finally:
             self._cleanup_download_connection()
+
+    def _process_initial_rover_gga(self, headers):
+        """Process authenticated initial NTRIP 1.0 body or 2.0 GGA header."""
+        header_gga = headers.get('ntrip-gga', '')
+        if header_gga:
+            self._consume_rover_gga(
+                header_gga.encode('ascii', errors='ignore') + b'\r\n'
+            )
+
+        initial_rover_data = self._initial_rover_data
+        self._initial_rover_data = b''
+        if initial_rover_data:
+            self._consume_rover_gga(initial_rover_data)
+
+    def _consume_rover_gga(self, rover_data):
+        """Parse and store GGA without allowing parser errors to affect RTCM."""
+        try:
+            parsed_messages = self._rover_gga_accumulator.feed(rover_data)
+        except Exception:
+            return 0
+
+        updated_count = 0
+        for parsed_message in parsed_messages:
+            try:
+                updated = connection.update_rover_gga(
+                    self.username,
+                    self.download_connection_id,
+                    parsed_message.to_dict(),
+                )
+            except Exception:
+                updated = False
+            if updated:
+                updated_count += 1
+        return updated_count
 
     def _cleanup_download_connection(self):
         """同步且可重複執行地回滾下載端的所有註冊與 socket。"""

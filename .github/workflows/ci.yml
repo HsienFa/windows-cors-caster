@@ -68,6 +68,15 @@ jobs:
       - name: Run CI workflow regression tests
         run: python -m unittest discover -s tests -p "test_ci_workflow.py"
 
+      - name: Run rover GGA tests
+        run: python -m unittest discover -s tests -p "test_rover_gga.py"
+
+      - name: Run rover Web API tests
+        run: python -m unittest discover -s tests -p "test_rover_web_api.py"
+
+      - name: Run rover frontend tests
+        run: python -m unittest discover -s tests -p "test_rover_frontend.py"
+
       - name: Check Python syntax
         shell: bash
         run: |
@@ -141,6 +150,18 @@ jobs:
       - name: Run NTRIP download handshake lifecycle tests
         shell: pwsh
         run: python -m unittest discover -s tests -p "test_ntrip_download_lifecycle.py"
+
+      - name: Run rover GGA tests
+        shell: pwsh
+        run: python -m unittest discover -s tests -p "test_rover_gga.py"
+
+      - name: Run rover Web API tests
+        shell: pwsh
+        run: python -m unittest discover -s tests -p "test_rover_web_api.py"
+
+      - name: Run rover frontend tests
+        shell: pwsh
+        run: python -m unittest discover -s tests -p "test_rover_frontend.py"
 
       - name: Run Windows graceful shutdown tests
         shell: pwsh

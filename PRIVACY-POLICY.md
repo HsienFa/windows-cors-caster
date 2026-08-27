@@ -15,13 +15,13 @@
 
 ## 2. 本機處理的資料
 
-依使用方式，本軟體可能在營運者控制的 SQLite 資料庫、記憶體及日誌中處理管理員與 NTRIP 使用者名稱、雜湊密碼、掛載點、連線 IP、連線狀態、RTCM／STR 資訊、基站座標及系統狀態。營運者應依需要限制日誌、資料庫與備份存取，並制定保存與刪除期限。
+依使用方式，本軟體可能在營運者控制的 SQLite 資料庫、記憶體及日誌中處理管理員與 NTRIP 使用者名稱、雜湊密碼、掛載點、連線 IP、連線狀態、RTCM／STR 資訊、基站座標及系統狀態。Rover GGA 狀態與位置只保存在伺服器記憶體，不寫入資料庫或日誌。營運者應依需要限制日誌、資料庫與備份存取，並制定保存與刪除期限。
 
 ## 3. Google Maps 模式
 
 當 `provider = google` 且有有效 API Key 時，使用者的瀏覽器會直接連線至 Google 地圖服務。為載入及顯示地圖，Google 可能取得 IP 位址、HTTP referrer、裝置與瀏覽器資訊、地圖中心、縮放層級、顯示座標及其他必要請求資訊。
 
-基站座標可能具有敏感性。營運者必須在啟用外部 Google 地圖前，評估傳送地圖中心與基站座標是否符合內部政策、契約、法規及使用者預期。
+基站及 Rover 座標可能具有敏感性。登入後的管理頁若使用 Google Maps，瀏覽器會把需要顯示的 Rover 座標提供給 Google Maps JavaScript API。營運者必須在啟用外部 Google 地圖前，評估傳送地圖中心、基站座標及 Rover 座標是否符合內部政策、契約、法規及使用者預期。
 
 Google 的資料處理受 [Google Privacy Policy](https://policies.google.com/privacy)及 [Google Maps／Google Earth Additional Terms of Service](https://maps.google.com/help/terms_maps/)約束。
 
@@ -31,7 +31,7 @@ Google 的資料處理受 [Google Privacy Policy](https://policies.google.com/pr
 
 ## 5. 不應傳送給地圖服務的資料
 
-本軟體的地圖整合不應把 NTRIP 帳號或密碼、管理員密碼、Flask secret、Authorization 標頭或工作階段資料傳送給 Google Maps 或 OpenStreetMap。Google 標記內容限於基站名稱、掛載點、經緯度及線上狀態。
+本軟體的地圖整合不會把 NTRIP 帳號或密碼、管理員密碼、Flask secret、Authorization 標頭、原始 GGA 或工作階段資料傳送給 Google Maps 或 OpenStreetMap。Rover 明細只能由登入後的管理頁透過受保護 API 取得。
 
 ## 6. 原作者與其他外連
 

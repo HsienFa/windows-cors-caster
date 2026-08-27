@@ -71,7 +71,7 @@ function updateConnectionStatus() {
 // Page navigation
 function navigateTo(page) {
     // Check pages that require login
-    const requireLoginPages = ['users', 'mounts', 'settings'];
+    const requireLoginPages = ['users', 'mounts', 'monitor', 'settings'];
     if (requireLoginPages.includes(page)) {
         // Check login status
         checkLoginStatusForProtectedPage().then(isLoggedIn => {
@@ -92,6 +92,7 @@ function navigateTo(page) {
 // Execute actual page navigation
 function performNavigation(page) {
     if (currentPage === 'monitor' && page !== 'monitor') {
+        stopRoverPolling();
         destroyCurrentMap();
     }
 
@@ -99,7 +100,8 @@ function performNavigation(page) {
     document.querySelectorAll('.nav-item').forEach(item => {
         item.classList.remove('active');
     });
-    document.querySelector(`[data-page="${page}"]`).classList.add('active');
+    const activeNavigationItem = document.querySelector(`[data-page="${page}"]`);
+    if (activeNavigationItem) activeNavigationItem.classList.add('active');
 
     currentPage = page;
     
@@ -200,6 +202,7 @@ async function loadPageContent(page) {
                 // Ensure content panel is displayed on non-dashboard pages
                 contentDiv.parentElement.style.display = 'block';
                 contentDiv.innerHTML = getMonitorContent();
+                bindRoverStatusControls();
                 // Update monitoring data display immediately
                 updateMonitorData();
                 // Add INFO button event handling for STR items
@@ -210,6 +213,7 @@ async function loadPageContent(page) {
                 setTimeout(() => {
                     initializeMapForMonitor();
                 }, 300);
+                startRoverPolling();
                 break;
             case 'settings':
                 // Ensure content panel is displayed on non-dashboard pages
@@ -539,13 +543,19 @@ const mapRuntimeConfig = readMapRuntimeConfig();
 let currentMap = null;
 let activeMapProvider = null;
 let osmMarkerLayer = null;
+let osmRoverLayer = null;
 let osmPopupOverlay = null;
+const osmRoverFeatures = new Map();
 let googleMarker = null;
 let googleInfoWindow = null;
 let googleCoverageCircles = [];
+const googleRoverMarkers = new Map();
 let googleMapsReady = false;
 let googleMapsFailed = false;
 let currentMarkerDetails = null;
+let latestRoverSnapshot = [];
+const latestRoversById = new Map();
+let selectedRoverConnectionId = null;
 
 window.googleMapsApiReady = function() {
     googleMapsReady = true;
@@ -603,7 +613,7 @@ function updateMapProviderLabel(provider) {
     providerLabel.textContent = provider === 'google' ? 'Google Maps' : 'OpenStreetMap';
 }
 
-function destroyCurrentMap() {
+function destroyCurrentMap(preserveRoverSnapshot = false) {
     if (activeMapProvider === 'osm' && currentMap && typeof currentMap.setTarget === 'function') {
         currentMap.setTarget(null);
     }
@@ -614,14 +624,24 @@ function destroyCurrentMap() {
     if (googleInfoWindow) {
         googleInfoWindow.close();
     }
+    googleRoverMarkers.forEach(marker => marker.setMap(null));
+    googleRoverMarkers.clear();
+    if (osmRoverLayer) osmRoverLayer.getSource().clear();
+    osmRoverFeatures.clear();
 
     currentMap = null;
     activeMapProvider = null;
     osmMarkerLayer = null;
+    osmRoverLayer = null;
     osmPopupOverlay = null;
     googleMarker = null;
     googleInfoWindow = null;
     googleCoverageCircles = [];
+    selectedRoverConnectionId = null;
+    if (!preserveRoverSnapshot) {
+        latestRoverSnapshot = [];
+        latestRoversById.clear();
+    }
 }
 
 function clearCurrentMapMarker() {
@@ -629,18 +649,18 @@ function clearCurrentMapMarker() {
     if (osmMarkerLayer) {
         osmMarkerLayer.getSource().clear();
     }
-    if (osmPopupOverlay) {
+    if (osmPopupOverlay && selectedRoverConnectionId === null) {
         osmPopupOverlay.setPosition(undefined);
     }
     const popupElement = document.getElementById('map-marker-popup');
-    if (popupElement) popupElement.hidden = true;
+    if (popupElement && selectedRoverConnectionId === null) popupElement.hidden = true;
     if (googleMarker) {
         googleMarker.setMap(null);
         googleMarker = null;
     }
     googleCoverageCircles.forEach(circle => circle.setMap(null));
     googleCoverageCircles = [];
-    if (googleInfoWindow) googleInfoWindow.close();
+    if (googleInfoWindow && selectedRoverConnectionId === null) googleInfoWindow.close();
     showMapEmptyState();
 }
 
@@ -697,15 +717,18 @@ function initializeOpenStreetMap() {
     const mapContainer = document.getElementById('map');
     if (!mapContainer) return false;
 
-    destroyCurrentMap();
+    destroyCurrentMap(true);
     try {
         const layer = createOSMLayer();
         osmMarkerLayer = new ol.layer.Vector({
             source: new ol.source.Vector()
         });
+        osmRoverLayer = new ol.layer.Vector({
+            source: new ol.source.Vector()
+        });
         currentMap = new ol.Map({
             target: mapContainer,
-            layers: [layer, osmMarkerLayer],
+            layers: [layer, osmMarkerLayer, osmRoverLayer],
             view: new ol.View({
                 center: ol.proj.fromLonLat([
                     mapRuntimeConfig.defaultLongitude,
@@ -728,20 +751,39 @@ function initializeOpenStreetMap() {
             });
             currentMap.addOverlay(osmPopupOverlay);
             currentMap.on('singleclick', event => {
-                const stationFeature = currentMap.forEachFeatureAtPixel(
+                const clickedFeature = currentMap.forEachFeatureAtPixel(
                     event.pixel,
-                    feature => feature.get('isStationMarker') ? feature : null
+                    feature => (
+                        feature.get('roverConnectionId')
+                        || feature.get('isStationMarker')
+                    ) ? feature : null
                 );
-                if (stationFeature && currentMarkerDetails) {
+                const roverConnectionId = clickedFeature
+                    ? clickedFeature.get('roverConnectionId')
+                    : null;
+                if (roverConnectionId && latestRoversById.has(roverConnectionId)) {
+                    selectedRoverConnectionId = roverConnectionId;
+                    populateRoverMarkerDetails(
+                        popupElement,
+                        latestRoversById.get(roverConnectionId)
+                    );
+                    popupElement.hidden = false;
+                    osmPopupOverlay.setPosition(
+                        clickedFeature.getGeometry().getCoordinates()
+                    );
+                } else if (clickedFeature && currentMarkerDetails) {
+                    selectedRoverConnectionId = null;
                     populateMarkerDetails(popupElement, currentMarkerDetails);
                     popupElement.hidden = false;
-                    osmPopupOverlay.setPosition(stationFeature.getGeometry().getCoordinates());
+                    osmPopupOverlay.setPosition(clickedFeature.getGeometry().getCoordinates());
                 } else {
+                    selectedRoverConnectionId = null;
                     popupElement.hidden = true;
                     osmPopupOverlay.setPosition(undefined);
                 }
             });
         }
+        syncRoverMarkers(latestRoverSnapshot);
         return true;
     } catch (error) {
         currentMap = null;
@@ -756,7 +798,7 @@ function initializeGoogleMap() {
     const googleApiAvailable = typeof google !== 'undefined' && google.maps && google.maps.Map;
     if (!mapContainer || !mapRuntimeConfig.googleEnabled || !googleApiAvailable) return false;
 
-    destroyCurrentMap();
+    destroyCurrentMap(true);
     try {
         currentMap = new google.maps.Map(mapContainer, {
             center: {
@@ -782,6 +824,7 @@ function initializeGoogleMap() {
         googleInfoWindow = new google.maps.InfoWindow();
         updateMapProviderLabel('google');
         hideMapStatusMessage();
+        syncRoverMarkers(latestRoverSnapshot);
         return true;
     } catch (error) {
         currentMap = null;
@@ -792,14 +835,19 @@ function initializeGoogleMap() {
 
 function createOSMLayer() {
     const tileSource = new ol.source.OSM({
-        attributions: '&copy; <a href="https://www.openstreetmap.org/copyright" target="_blank" rel="noopener noreferrer">OpenStreetMap contributors</a>'
+        attributions: '&copy; <a href="https://www.openstreetmap.org/copyright" target="_blank" rel="noopener noreferrer">OpenStreetMap contributors</a>',
+        transition: 100
     });
 
     tileSource.on('tileloaderror', () => {
         showMapStatusMessage('無法取得 OpenStreetMap 圖磚；其他管理功能仍可正常使用。');
     });
 
-    return new ol.layer.Tile({ source: tileSource });
+    return new ol.layer.Tile({
+        source: tileSource,
+        preload: 1,
+        useInterimTilesOnError: true
+    });
 }
 
 function isCurrentMountOnline(mountName) {
@@ -898,6 +946,7 @@ function updateOpenStreetMapMarker(details, isInitialMarking) {
 
     const popupElement = document.getElementById('map-marker-popup');
     if (popupElement && osmPopupOverlay) {
+        selectedRoverConnectionId = null;
         populateMarkerDetails(popupElement, details);
         popupElement.hidden = false;
         osmPopupOverlay.setPosition(center);
@@ -906,6 +955,7 @@ function updateOpenStreetMapMarker(details, isInitialMarking) {
 
 function openGoogleMarkerInfo() {
     if (!googleInfoWindow || !googleMarker || !currentMarkerDetails || !currentMap) return;
+    selectedRoverConnectionId = null;
     const content = document.createElement('div');
     content.className = 'map-marker-popup';
     populateMarkerDetails(content, currentMarkerDetails);
@@ -997,6 +1047,197 @@ function refreshCurrentMapMarkerDetails() {
         if (popupElement && !popupElement.hidden) {
             populateMarkerDetails(popupElement, currentMarkerDetails);
         }
+    }
+}
+
+function roverMarkerColor(rover) {
+    const status = RoverState.getPositionStatus(rover);
+    if (status.key === 'fixed') return '#2e7d32';
+    if (status.key === 'float') return '#ef8c00';
+    if (status.key === 'stale') return '#757575';
+    return '#00838f';
+}
+
+function formatRoverNumber(value, digits, suffix = '') {
+    const numericValue = Number(value);
+    if (!Number.isFinite(numericValue)) return '—';
+    return `${numericValue.toFixed(digits)}${suffix}`;
+}
+
+function formatGgaAge(rover) {
+    if (!rover || !rover.last_gga_time) return '無位置資料';
+    const age = Number(rover.gga_age_seconds);
+    if (!Number.isFinite(age)) return '未知';
+    if (age < 60) return `${Math.max(0, Math.round(age))} 秒前`;
+    if (age < 3600) return `${Math.floor(age / 60)} 分鐘前`;
+    return `${Math.floor(age / 3600)} 小時前`;
+}
+
+function appendSafePopupRow(container, label, value) {
+    const row = document.createElement('div');
+    row.className = 'map-marker-popup-row';
+    const labelElement = document.createElement('span');
+    labelElement.className = 'map-marker-popup-label';
+    labelElement.textContent = `${label}：`;
+    const valueElement = document.createElement('span');
+    valueElement.textContent = String(value);
+    row.append(labelElement, valueElement);
+    container.appendChild(row);
+}
+
+function populateRoverMarkerDetails(container, rover) {
+    container.replaceChildren();
+    const status = RoverState.getPositionStatus(rover);
+    const rows = [
+        ['使用者', rover.username || '未知'],
+        ['掛載點', rover.mount_name || '未知'],
+        ['設備', rover.user_agent || '未知'],
+        ['定位', status.label],
+        ['衛星', rover.satellites ?? '—'],
+        ['HDOP', formatRoverNumber(rover.hdop, 2)],
+        ['高程', formatRoverNumber(rover.altitude, 1, ' m')],
+        ['主站距離', formatRoverNumber(rover.distance_to_base_km, 2, ' km')],
+        ['最後 GGA', formatGgaAge(rover)]
+    ];
+    rows.forEach(([label, value]) => appendSafePopupRow(container, label, value));
+}
+
+function closeRoverMarkerPopup(connectionId) {
+    if (selectedRoverConnectionId !== String(connectionId)) return;
+    selectedRoverConnectionId = null;
+    if (osmPopupOverlay) osmPopupOverlay.setPosition(undefined);
+    const popupElement = document.getElementById('map-marker-popup');
+    if (popupElement) popupElement.hidden = true;
+    if (googleInfoWindow) googleInfoWindow.close();
+}
+
+function createOpenStreetMapRoverFeature(rover) {
+    const feature = new ol.Feature({
+        geometry: new ol.geom.Point(ol.proj.fromLonLat([
+            Number(rover.longitude),
+            Number(rover.latitude)
+        ])),
+        roverConnectionId: String(rover.connection_id)
+    });
+    updateOpenStreetMapRoverFeature(feature, rover);
+    osmRoverLayer.getSource().addFeature(feature);
+    return feature;
+}
+
+function updateOpenStreetMapRoverFeature(feature, rover) {
+    feature.getGeometry().setCoordinates(ol.proj.fromLonLat([
+        Number(rover.longitude),
+        Number(rover.latitude)
+    ]));
+    feature.setStyle(new ol.style.Style({
+        image: new ol.style.Circle({
+            radius: 11,
+            fill: new ol.style.Fill({ color: roverMarkerColor(rover) }),
+            stroke: new ol.style.Stroke({ color: '#ffffff', width: 3 })
+        }),
+        text: new ol.style.Text({
+            text: 'R',
+            font: 'bold 12px Arial',
+            fill: new ol.style.Fill({ color: '#ffffff' })
+        })
+    }));
+}
+
+function syncOpenStreetMapRovers(rovers) {
+    if (!osmRoverLayer) return;
+    RoverState.reconcileMarkers(rovers, osmRoverFeatures, {
+        create: createOpenStreetMapRoverFeature,
+        update: updateOpenStreetMapRoverFeature,
+        remove: (feature, connectionId) => {
+            osmRoverLayer.getSource().removeFeature(feature);
+            closeRoverMarkerPopup(connectionId);
+        }
+    });
+}
+
+function googleRoverMarkerAppearance(rover) {
+    return {
+        icon: {
+            path: google.maps.SymbolPath.CIRCLE,
+            fillColor: roverMarkerColor(rover),
+            fillOpacity: 1,
+            strokeColor: '#ffffff',
+            strokeWeight: 3,
+            scale: 11
+        },
+        label: {
+            text: 'R',
+            color: '#ffffff',
+            fontSize: '12px',
+            fontWeight: '700'
+        }
+    };
+}
+
+function openGoogleRoverInfo(connectionId, marker) {
+    if (!googleInfoWindow || !currentMap || !latestRoversById.has(connectionId)) return;
+    selectedRoverConnectionId = connectionId;
+    const content = document.createElement('div');
+    content.className = 'map-marker-popup';
+    populateRoverMarkerDetails(content, latestRoversById.get(connectionId));
+    googleInfoWindow.setContent(content);
+    googleInfoWindow.open({ map: currentMap, anchor: marker });
+}
+
+function createGoogleRoverMarker(rover) {
+    const connectionId = String(rover.connection_id);
+    const appearance = googleRoverMarkerAppearance(rover);
+    const marker = new google.maps.Marker({
+        map: currentMap,
+        position: {
+            lat: Number(rover.latitude),
+            lng: Number(rover.longitude)
+        },
+        title: `${rover.username || 'Rover'} — ${RoverState.getPositionStatus(rover).label}`,
+        icon: appearance.icon,
+        label: appearance.label
+    });
+    marker.addListener('click', () => openGoogleRoverInfo(connectionId, marker));
+    return marker;
+}
+
+function updateGoogleRoverMarker(marker, rover) {
+    const appearance = googleRoverMarkerAppearance(rover);
+    marker.setMap(currentMap);
+    marker.setPosition({
+        lat: Number(rover.latitude),
+        lng: Number(rover.longitude)
+    });
+    marker.setTitle(`${rover.username || 'Rover'} — ${RoverState.getPositionStatus(rover).label}`);
+    marker.setIcon(appearance.icon);
+    marker.setLabel(appearance.label);
+}
+
+function syncGoogleRovers(rovers) {
+    if (!currentMap || typeof google === 'undefined' || !google.maps) return;
+    RoverState.reconcileMarkers(rovers, googleRoverMarkers, {
+        create: createGoogleRoverMarker,
+        update: updateGoogleRoverMarker,
+        remove: (marker, connectionId) => {
+            marker.setMap(null);
+            closeRoverMarkerPopup(connectionId);
+        }
+    });
+}
+
+function syncRoverMarkers(rovers) {
+    latestRoverSnapshot = Array.isArray(rovers) ? rovers.slice() : [];
+    latestRoversById.clear();
+    latestRoverSnapshot.forEach(rover => {
+        if (rover.connection_id) {
+            latestRoversById.set(String(rover.connection_id), rover);
+        }
+    });
+
+    if (activeMapProvider === 'osm') {
+        syncOpenStreetMapRovers(latestRoverSnapshot);
+    } else if (activeMapProvider === 'google') {
+        syncGoogleRovers(latestRoverSnapshot);
     }
 }
 
@@ -1684,6 +1925,167 @@ function getMountsContent(mounts) {
     `;
 }
 
+const ROVER_POLL_INTERVAL_MS = 3000;
+let roverPollingTimer = null;
+let roverPollingAbortController = null;
+let roverFetchInFlight = false;
+let roverPollingGeneration = 0;
+
+function stopRoverPolling() {
+    roverPollingGeneration += 1;
+    if (roverPollingTimer !== null) {
+        window.clearInterval(roverPollingTimer);
+        roverPollingTimer = null;
+    }
+    if (roverPollingAbortController) {
+        roverPollingAbortController.abort();
+        roverPollingAbortController = null;
+    }
+    roverFetchInFlight = false;
+}
+
+function startRoverPolling() {
+    stopRoverPolling();
+    if (currentPage !== 'monitor') return;
+    fetchRoverStatus();
+    roverPollingTimer = window.setInterval(fetchRoverStatus, ROVER_POLL_INTERVAL_MS);
+}
+
+async function fetchRoverStatus() {
+    if (currentPage !== 'monitor' || roverFetchInFlight) return;
+    const requestGeneration = roverPollingGeneration;
+    roverFetchInFlight = true;
+    const abortController = new AbortController();
+    roverPollingAbortController = abortController;
+    try {
+        const response = await fetch('/api/rovers', {
+            signal: abortController.signal,
+            headers: { Accept: 'application/json' }
+        });
+        if (response.status === 401) {
+            stopRoverPolling();
+            window.location.href = '/login?redirect=monitor';
+            return;
+        }
+        const payload = await handleApiResponse(response, true);
+        if (
+            currentPage !== 'monitor'
+            || requestGeneration !== roverPollingGeneration
+        ) return;
+        renderRoverStatus(Array.isArray(payload.rovers) ? payload.rovers : []);
+        const updateElement = document.getElementById('rover-last-update');
+        if (updateElement) updateElement.textContent = '已更新';
+    } catch (error) {
+        if (error.name !== 'AbortError' && currentPage === 'monitor') {
+            const updateElement = document.getElementById('rover-last-update');
+            if (updateElement) updateElement.textContent = '暫時無法更新';
+        }
+    } finally {
+        if (requestGeneration === roverPollingGeneration) {
+            roverFetchInFlight = false;
+            if (roverPollingAbortController === abortController) {
+                roverPollingAbortController = null;
+            }
+        }
+    }
+}
+
+function bindRoverStatusControls() {
+    const filterInput = document.getElementById('rover-username-filter');
+    if (!filterInput) return;
+    filterInput.addEventListener('input', () => renderRoverTable(
+        RoverState.filterByUsername(latestRoverSnapshot, filterInput.value)
+    ));
+}
+
+function updateRoverSummary(rovers) {
+    const summary = RoverState.summarize(rovers);
+    const values = {
+        'rover-summary-online': summary.online,
+        'rover-summary-valid': summary.valid,
+        'rover-summary-fixed': summary.fixed,
+        'rover-summary-float': summary.float,
+        'rover-summary-other': summary.other,
+        'rover-summary-missing': summary.noPosition
+    };
+    Object.entries(values).forEach(([elementId, value]) => {
+        const element = document.getElementById(elementId);
+        if (element) element.textContent = String(value);
+    });
+}
+
+function appendRoverTableCell(row, value, className = '') {
+    const cell = document.createElement('td');
+    if (className) cell.className = className;
+    cell.textContent = value === null || value === undefined || value === ''
+        ? '—'
+        : String(value);
+    row.appendChild(cell);
+    return cell;
+}
+
+function renderRoverTable(rovers) {
+    const container = document.getElementById('rover-table-container');
+    if (!container) return;
+    container.replaceChildren();
+
+    const table = document.createElement('table');
+    table.className = 'data-table rover-table';
+    const header = document.createElement('thead');
+    const headerRow = document.createElement('tr');
+    [
+        '使用者', '掛載點', '設備 / User-Agent', 'IP', '定位狀態',
+        '衛星數', 'HDOP', '高程', '最後 GGA', '上線時間'
+    ].forEach(label => {
+        const cell = document.createElement('th');
+        cell.textContent = label;
+        headerRow.appendChild(cell);
+    });
+    header.appendChild(headerRow);
+    table.appendChild(header);
+
+    const body = document.createElement('tbody');
+    if (rovers.length === 0) {
+        const emptyRow = document.createElement('tr');
+        const emptyCell = document.createElement('td');
+        emptyCell.colSpan = 10;
+        emptyCell.className = 'rover-table-empty';
+        emptyCell.textContent = '目前沒有符合條件的在線 Rover。';
+        emptyRow.appendChild(emptyCell);
+        body.appendChild(emptyRow);
+    } else {
+        rovers.forEach(rover => {
+            const row = document.createElement('tr');
+            appendRoverTableCell(row, rover.username);
+            appendRoverTableCell(row, rover.mount_name);
+            appendRoverTableCell(row, rover.user_agent || '未知');
+            appendRoverTableCell(row, rover.ip_address);
+
+            const status = RoverState.getPositionStatus(rover);
+            const statusCell = appendRoverTableCell(row, status.label);
+            statusCell.classList.add('rover-position-status', `rover-status-${status.key}`);
+            appendRoverTableCell(row, rover.satellites);
+            appendRoverTableCell(row, formatRoverNumber(rover.hdop, 2));
+            appendRoverTableCell(row, formatRoverNumber(rover.altitude, 1, ' m'));
+            appendRoverTableCell(row, formatGgaAge(rover));
+            appendRoverTableCell(row, rover.connect_datetime);
+            body.appendChild(row);
+        });
+    }
+    table.appendChild(body);
+    container.appendChild(table);
+}
+
+function renderRoverStatus(rovers) {
+    syncRoverMarkers(rovers);
+    updateRoverSummary(rovers);
+    const filterInput = document.getElementById('rover-username-filter');
+    renderRoverTable(RoverState.filterByUsername(
+        rovers,
+        filterInput ? filterInput.value : ''
+    ));
+}
+
 // RTCM监控内容
 function getMonitorContent() {
     return `
@@ -1695,6 +2097,21 @@ function getMonitorContent() {
         <div class="monitor-dashboard">
             <!-- 主要内容区域 -->
             <div class="monitor-grid">
+                <div class="monitor-card full-width">
+                    <div class="card-header">
+                        <h4><i class="fas fa-location-arrow"></i> Rover 狀態總覽</h4>
+                        <span id="rover-last-update" class="card-status">等待更新</span>
+                    </div>
+                    <div class="card-content rover-summary-grid">
+                        <div class="rover-summary-item"><span>在線使用者</span><strong id="rover-summary-online">0</strong></div>
+                        <div class="rover-summary-item"><span>有效位置</span><strong id="rover-summary-valid">0</strong></div>
+                        <div class="rover-summary-item fixed"><span>RTK 固定</span><strong id="rover-summary-fixed">0</strong></div>
+                        <div class="rover-summary-item float"><span>RTK 浮點</span><strong id="rover-summary-float">0</strong></div>
+                        <div class="rover-summary-item other"><span>其他定位</span><strong id="rover-summary-other">0</strong></div>
+                        <div class="rover-summary-item missing"><span>無位置 / 逾時</span><strong id="rover-summary-missing">0</strong></div>
+                    </div>
+                </div>
+
                 <!-- STR数据表 - 全宽 -->
                 <div class="monitor-card full-width">
                     <div class="card-header">
@@ -1727,7 +2144,7 @@ function getMonitorContent() {
                 <!-- 基准站位置 - 全宽 -->
                 <div class="monitor-card full-width">
                     <div class="card-header">
-                        <h4><i class="fas fa-map-marker-alt"></i> 基站位置</h4>
+                        <h4><i class="fas fa-map-marker-alt"></i> 基站與 Rover 即時位置</h4>
                         <span id="map-provider-label" class="map-provider-label">載入中</span>
                     </div>
                     <div class="card-content map-content">
@@ -1741,6 +2158,19 @@ function getMonitorContent() {
                             </div>
                             <div id="map-marker-popup" class="map-marker-popup" hidden></div>
                         </div>
+                    </div>
+                </div>
+
+                <div class="monitor-card full-width">
+                    <div class="card-header rover-table-header">
+                        <h4><i class="fas fa-list"></i> 在線 Rover</h4>
+                        <label class="rover-filter-label" for="rover-username-filter">
+                            <span>搜尋使用者</span>
+                            <input id="rover-username-filter" type="search" autocomplete="off" placeholder="輸入 username">
+                        </label>
+                    </div>
+                    <div class="card-content rover-table-container" id="rover-table-container">
+                        <p class="loading-text">正在載入 Rover 狀態...</p>
                     </div>
                 </div>
 
@@ -1803,7 +2233,7 @@ socket.on('log_message', function(data) {
 
 // user
 socket.on('online_users_update', function(data) {
-    window.onlineUsers = data.users;
+    window.onlineUserCount = Number(data.online_user_count) || 0;
     updateOnlineStatus();
 });
 
@@ -2142,8 +2572,8 @@ function updateSystemStats(stats) {
         updateMountDetails(stats.mounts);
     }
     
-    if (stats.users) {
-        updateElement('total-users', Object.keys(stats.users).length);
+    if (stats.user_count !== undefined) {
+        updateElement('total-users', Number(stats.user_count) || 0);
     }
     
     if (stats.data_transfer) {
@@ -2287,7 +2717,7 @@ function updateOnlineStatus() {
 //
 function updateDashboardCounts() {
     // users
-    const onlineUsersCount = window.onlineUsers ? Object.keys(window.onlineUsers).length : 0;
+    const onlineUsersCount = Number(window.onlineUserCount) || 0;
     const dashboardOnlineUsersElement = document.getElementById('dashboard-online-users');
     if (dashboardOnlineUsersElement) {
         dashboardOnlineUsersElement.textContent = onlineUsersCount;
@@ -2467,7 +2897,9 @@ function addLogLine(message, type = 'info') {
 // Initialization after page load completion
 document.addEventListener('DOMContentLoaded', function() {
     // Initialize page
-    navigateTo('dashboard');
+    const requestedPage = new URLSearchParams(window.location.search).get('page');
+    const knownPages = ['dashboard', 'users', 'mounts', 'monitor', 'settings'];
+    navigateTo(knownPages.includes(requestedPage) ? requestedPage : 'dashboard');
     
     // Load frequency mapping table
     loadFrequencyMap();
@@ -3188,6 +3620,7 @@ function cancelConfirm() {
             '確認登出',
             '確定要登出嗎？',
             () => {
+                stopRoverPolling();
                 fetch('/logout', {
                     method: 'POST',
                     headers: {

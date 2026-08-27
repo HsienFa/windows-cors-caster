@@ -29,13 +29,13 @@
 
     <h2>Google Maps 模式</h2>
     <p>當 <code>provider = google</code> 且有有效 Key 時，瀏覽器會直接連線至 Google 地圖服務。Google 可能取得 IP、HTTP referrer、裝置或瀏覽器資訊、地圖中心、縮放層級與顯示座標等必要請求資訊。</p>
-    <p>基站座標可能具有敏感性，管理員應先評估是否適合交由外部地圖服務處理。相關資料處理受 <a href="https://policies.google.com/privacy" target="_blank" rel="noopener noreferrer">Google Privacy Policy</a> 及 <a href="https://maps.google.com/help/terms_maps/" target="_blank" rel="noopener noreferrer">Google Maps／Google Earth Additional Terms of Service</a> 約束。</p>
+    <p>基站及 Rover 座標可能具有敏感性，管理員應先評估是否適合交由外部地圖服務處理。登入後的管理頁若使用 Google Maps，瀏覽器會把需要顯示的 Rover 座標提供給 Google Maps JavaScript API。相關資料處理受 <a href="https://policies.google.com/privacy" target="_blank" rel="noopener noreferrer">Google Privacy Policy</a> 及 <a href="https://maps.google.com/help/terms_maps/" target="_blank" rel="noopener noreferrer">Google Maps／Google Earth Additional Terms of Service</a> 約束。</p>
 
     <h2>OpenStreetMap 模式</h2>
     <p>當 <code>provider = osm</code> 或 Google 無法使用時，瀏覽器會向 OpenStreetMap 圖磚服務提出請求，可能揭露 IP、瀏覽器標頭、referrer、圖磚座標及縮放層級。</p>
 
     <h2>不傳送給地圖服務的資料</h2>
-    <p>NTRIP 帳密、管理員密碼、Flask secret、Authorization 標頭及工作階段資料不應傳送給 Google Maps 或 OpenStreetMap。Google 標記只使用基站名稱、掛載點、經緯度及線上狀態。</p>
+    <p>NTRIP 帳密、管理員密碼、Flask secret、Authorization 標頭、原始 GGA 及工作階段資料不會傳送給 Google Maps 或 OpenStreetMap。Rover 狀態只保存在伺服器記憶體，並由登入後的管理頁取得；本功能不把 Rover 位置寫入資料庫或日誌。</p>
 
     <h2>原作者與其他外連</h2>
     <p>目前軟體沒有主動將使用者、基站、帳密、日誌或使用統計回傳給原作者。營運者網站及電子郵件是使用者自行點擊的連結；套件或映像下載則由管理員主動執行。</p>
