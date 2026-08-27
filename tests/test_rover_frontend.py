@@ -294,25 +294,49 @@ class RoverFrontendTests(unittest.TestCase):
             self.template_source,
         )
 
-    def test_existing_station_markers_coverage_and_fallback_remain_intact(self):
+    def test_station_reference_rings_and_fallback_remain_intact(self):
         osm_station = self.app_source.split(
             "function updateOpenStreetMapMarker", 1
         )[1].split("function openGoogleMarkerInfo", 1)[0]
         self.assertIn("isStationMarker: true", osm_station)
-        self.assertIn("[20000, 'rgba(21, 101, 192, 0.15)']", osm_station)
-        self.assertIn("[50000, 'rgba(66, 165, 245, 0.2)']", osm_station)
+        self.assertIn("[5000, 'rgba(21, 101, 192, 0.14)']", osm_station)
+        self.assertIn("[10000, 'rgba(66, 165, 245, 0.12)']", osm_station)
+        self.assertNotIn("[20000,", osm_station)
+        self.assertNotIn("[50000,", osm_station)
         self.assertIn("populateMarkerDetails(popupElement, details)", osm_station)
 
         google_station = self.app_source.split(
             "function updateGoogleMapMarker", 1
         )[1].split("function updateMapLocation", 1)[0]
         self.assertIn("new google.maps.Circle", google_station)
-        self.assertIn("radius: 20000", google_station)
-        self.assertIn("radius: 50000", google_station)
+        self.assertIn("radius: 5000", google_station)
+        self.assertIn("radius: 10000", google_station)
+        self.assertIn("fillOpacity: 0.14", google_station)
+        self.assertIn("fillOpacity: 0.12", google_station)
+        self.assertNotIn("fillOpacity: 0.08", google_station)
+        self.assertNotIn("radius: 20000", google_station)
+        self.assertNotIn("radius: 50000", google_station)
         self.assertIn("openGoogleMarkerInfo()", google_station)
 
         self.assertIn("window.googleMapsApiFailed", self.app_source)
         self.assertIn("fallbackToOpenStreetMap(", self.app_source)
+
+    def test_reference_ring_legend_is_explicitly_not_an_rtk_guarantee(self):
+        self.assertIn("5 km</strong>：單基站使用參考範圍", self.app_source)
+        self.assertIn("10 km</strong>：單基站延伸使用參考範圍", self.app_source)
+        self.assertIn("※ 此範圍僅供使用參考，非定位精度保證。", self.app_source)
+        self.assertNotIn("覆蓋範圍", self.app_source)
+        self.assertNotIn("有效範圍", self.app_source)
+        self.assertIn(".map-reference-legend", self.template_source)
+        self.assertIn("background: rgba(66, 165, 245, 0.12)", self.template_source)
+
+    def test_map_center_threshold_remains_50_km(self):
+        position_update = self.app_source.split(
+            "function handlePositionUpdate", 1
+        )[1].split("function updateStationInfo", 1)[0]
+        self.assertIn("distance >= 500", position_update)
+        self.assertIn("centerDistance >= 50000", position_update)
+        self.assertIn(">= 50km threshold", position_update)
 
     def test_privacy_text_covers_authenticated_google_rover_coordinates(self):
         self.assertIn("登入後的管理頁若使用 Google Maps", self.privacy_source)
