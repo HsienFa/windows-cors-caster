@@ -73,6 +73,9 @@ CONNECTION_QUEUE_SIZE = config.CONNECTION_QUEUE_SIZE
 
 class NTRIPHandler:
     """NTRIP请求处理器"""
+
+    _WINDOWS_PEER_DISCONNECT_ERRORS = frozenset({10053, 10054})
+    _WINDOWS_CLOSED_SOCKET_ERRORS = frozenset({10038, 10057, 10058})
     
     def __init__(self, client_socket, client_address, db_manager):
         self.client_socket = client_socket
@@ -127,47 +130,86 @@ class NTRIPHandler:
                 logger.log_debug("TCP Keep-Alive已启用（使用系统默认参数）", 'ntrip')
         except Exception as e:
             logger.log_debug(f"配置Keep-Alive失败: {e}", 'ntrip')
+
+    @classmethod
+    def _is_peer_disconnect_error(cls, error, include_closed_socket=False):
+        """Return whether an OSError represents an expected peer disconnect."""
+        if isinstance(
+            error,
+            (ConnectionResetError, ConnectionAbortedError, BrokenPipeError),
+        ):
+            return True
+
+        winerror = getattr(error, 'winerror', None)
+        if winerror in cls._WINDOWS_PEER_DISCONNECT_ERRORS:
+            return True
+        return (
+            include_closed_socket
+            and winerror in cls._WINDOWS_CLOSED_SOCKET_ERRORS
+        )
+
+    def _log_peer_disconnect(self, operation):
+        """Log expected disconnects briefly without exposing request contents."""
+        message_key = f"peer_disconnect_{operation}"
+        if not anti_spam_logger.should_log(message_key):
+            return
+
+        suppressed = anti_spam_logger.get_suppressed_count(message_key)
+        message = f"用戶端在{operation}時中斷連線"
+        if suppressed > 0:
+            message += f"（已抑制 {suppressed} 筆相似訊息）"
+        logger.log_debug(message, 'ntrip')
     
     def handle_request(self):
         """处理NTRIP请求，增强验证和错误处理"""
         try:
             # 改为debug级别，避免频繁日志
             log_debug(f"=== 开始处理请求 {self.client_address} ===")
-           
-            request_bytes = self.client_socket.recv(BUFFER_SIZE)
+
+            try:
+                request_bytes = self.client_socket.recv(BUFFER_SIZE)
+            except OSError as e:
+                if not self._is_peer_disconnect_error(e):
+                    raise
+                self._log_peer_disconnect("接收初始請求")
+                self._cleanup()
+                return
+
             if not request_bytes:
                 log_debug(f"客户端 {self.client_address} 发送空请求")
+                self._cleanup()
                 return
 
             request_data = request_bytes.decode('utf-8', errors='ignore')
             header_bytes, separator, request_body = request_bytes.partition(b'\r\n\r\n')
             header_data = header_bytes.decode('utf-8', errors='ignore')
-            request_method = header_data.split(None, 1)[0].upper() if header_data else ''
+            request_parts = header_data.split(None, 1)
+            if not request_parts:
+                log_debug(f"客户端 {self.client_address} 未发送有效请求行")
+                self._cleanup()
+                return
+
+            request_method = request_parts[0].upper()
             if separator and request_method == 'GET':
                 self._initial_rover_data = request_body
                 request_data = header_data
-            
-            raw_request = request_data[:200]
-            sanitized_request = self._sanitize_request_for_logging(raw_request)
 
-            # 改为debug级别，避免频繁日志
-            log_debug(f"检测到连接请求来自 {self.client_address}: {sanitized_request}")
-            
             lines = request_data.strip().split('\r\n')
             if not lines or not lines[0].strip():
-                self.send_error_response(400, "Bad Request: Empty request line")
+                log_debug(f"客户端 {self.client_address} 未发送有效请求行")
+                self._cleanup()
                 return
-            
+
             request_line = lines[0]
             try:
                 method, path, protocol = self._parse_request_line(request_line)
-               
+
                 self.current_method = method.upper()
-            except ValueError as e:
-                log_debug(f"请求行解析失败 {self.client_address}: {e}")
-                self.send_error_response(400, f"Bad Request: {str(e)}")
+            except ValueError:
+                log_debug(f"请求行解析失败 {self.client_address}")
+                self.send_error_response(400, "Bad Request: Invalid request line")
                 return
-            
+
             headers = self._parse_headers(lines[1:])
             
             if self._is_empty_request(method, path, headers):
@@ -179,11 +221,19 @@ class NTRIPHandler:
             
             is_valid, error_msg = self._is_valid_request(method, path, headers)
             if not is_valid:
+                if error_msg.startswith("Unsupported method:"):
+                    error_msg = "Unsupported method"
                 # 验证失败保持info级别，这是重要信息
                 log_info(f"請求驗證失敗 {self.client_address}：{error_msg}")
                 self.send_error_response(400, f"Bad Request: {error_msg}")
                 return
-            
+
+            raw_request = request_data[:200]
+            sanitized_request = self._sanitize_request_for_logging(raw_request)
+
+            # 改为debug级别，避免频繁日志
+            log_debug(f"检测到连接请求来自 {self.client_address}: {sanitized_request}")
+
             self.user_agent = headers.get('user-agent', 'Unknown')
             
             # 改为debug级别，避免频繁日志
@@ -1596,13 +1646,19 @@ a=control:*
             self._send_response(
                 f"HTTP/1.1 {code} {status_text}",
                 content_type="text/plain",
-                content=message
+                content=message,
+                disconnects_are_debug=True,
             )
         else:
             # NTRIP 1.0格式
             try:
                 response = f"ERROR {code} {message}\r\n\r\n"
                 self.client_socket.send(response.encode('utf-8'))
+            except OSError as e:
+                if self._is_peer_disconnect_error(e, include_closed_socket=True):
+                    self._log_peer_disconnect("傳送錯誤回應")
+                else:
+                    logger.log_error(f"傳送錯誤回應失敗：{e}", exc_info=True)
             except Exception as e:
                 logger.log_error(f"傳送錯誤回應失敗：{e}", exc_info=True)
     
@@ -1644,6 +1700,7 @@ a=control:*
         content=None,
         additional_headers=None,
         raise_errors=False,
+        disconnects_are_debug=False,
     ):
         """发送标准化HTTP响应"""
         try:
@@ -1663,6 +1720,16 @@ a=control:*
             
             self.client_socket.sendall(response.encode('utf-8'))
             
+        except OSError as e:
+            if disconnects_are_debug and self._is_peer_disconnect_error(
+                e,
+                include_closed_socket=True,
+            ):
+                self._log_peer_disconnect("傳送錯誤回應")
+            else:
+                logger.log_error(f"傳送回應失敗：{e}", exc_info=True)
+            if raise_errors:
+                raise
         except Exception as e:
             logger.log_error(f"傳送回應失敗：{e}", exc_info=True)
             if raise_errors:
