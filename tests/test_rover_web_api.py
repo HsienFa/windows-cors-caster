@@ -283,5 +283,155 @@ class RoverWebApiTests(unittest.TestCase):
         self.assertFalse(no_gga["position_fresh"])
 
 
+class SocketIOParserLifecycleTests(unittest.TestCase):
+    """Web parser ownership belongs to the server, not a browser socket."""
+
+    def setUp(self):
+        self.web_manager = web.WebManager(
+            db_manager=mock.Mock(),
+            data_forwarder=mock.Mock(),
+            start_time=0,
+        )
+        self.web_manager.app.secret_key = secrets.token_urlsafe(32)
+        self.web_manager.app.config.update(TESTING=True)
+
+        self.current_mount_patcher = mock.patch.object(
+            web.rtcm_manager,
+            "get_current_web_mount",
+            return_value="TEST",
+        )
+        self.current_mount = self.current_mount_patcher.start()
+        self.addCleanup(self.current_mount_patcher.stop)
+
+        self.stop_parser_patcher = mock.patch.object(
+            web.rtcm_manager,
+            "stop_realtime_parsing",
+        )
+        self.stop_parser = self.stop_parser_patcher.start()
+        self.addCleanup(self.stop_parser_patcher.stop)
+
+    @staticmethod
+    def _disconnect_if_connected(socket_client):
+        if socket_client.is_connected():
+            socket_client.disconnect()
+
+    def _make_socket_client(self, authenticated=False):
+        flask_client = self.web_manager.app.test_client()
+        if authenticated:
+            with flask_client.session_transaction() as session:
+                session["admin_logged_in"] = True
+                session["admin_username"] = "test-admin"
+
+        socket_client = self.web_manager.socketio.test_client(
+            self.web_manager.app,
+            flask_test_client=flask_client,
+        )
+        self.assertTrue(socket_client.is_connected())
+        self.addCleanup(self._disconnect_if_connected, socket_client)
+        return flask_client, socket_client
+
+    def test_anonymous_disconnect_does_not_stop_active_web_parser(self):
+        _, socket_client = self._make_socket_client()
+
+        socket_client.disconnect()
+
+        self.stop_parser.assert_not_called()
+
+    def test_authenticated_disconnect_does_not_stop_active_web_parser(self):
+        _, socket_client = self._make_socket_client(authenticated=True)
+
+        socket_client.disconnect()
+
+        self.stop_parser.assert_not_called()
+
+    def test_anonymous_disconnect_does_not_interrupt_authenticated_client(self):
+        _, anonymous_socket = self._make_socket_client()
+        _, authenticated_socket = self._make_socket_client(authenticated=True)
+
+        anonymous_socket.disconnect()
+
+        self.assertTrue(authenticated_socket.is_connected())
+        self.stop_parser.assert_not_called()
+
+    def test_one_of_two_authenticated_disconnects_does_not_stop_parser(self):
+        _, first_socket = self._make_socket_client(authenticated=True)
+        _, second_socket = self._make_socket_client(authenticated=True)
+
+        first_socket.disconnect()
+
+        self.assertTrue(second_socket.is_connected())
+        self.stop_parser.assert_not_called()
+
+    def test_refresh_old_connection_disconnect_does_not_stop_current_parser(self):
+        _, old_socket = self._make_socket_client()
+        _, replacement_socket = self._make_socket_client()
+
+        old_socket.disconnect()
+
+        self.assertTrue(replacement_socket.is_connected())
+        self.stop_parser.assert_not_called()
+
+    def test_repeated_delayed_disconnects_do_not_stop_new_parser(self):
+        _, first_old_socket = self._make_socket_client()
+        _, second_old_socket = self._make_socket_client(authenticated=True)
+        _, current_socket = self._make_socket_client(authenticated=True)
+
+        first_old_socket.disconnect()
+        second_old_socket.disconnect()
+
+        self.assertTrue(current_socket.is_connected())
+        self.stop_parser.assert_not_called()
+
+    def test_authenticated_stop_api_still_stops_global_parser(self):
+        flask_client, _ = self._make_socket_client(authenticated=True)
+
+        response = flask_client.post("/api/mount/rtcm-parse/stop")
+
+        self.assertEqual(response.status_code, 200)
+        self.stop_parser.assert_called_once_with()
+
+    def test_authenticated_start_api_behavior_is_preserved(self):
+        flask_client, _ = self._make_socket_client(authenticated=True)
+
+        with mock.patch.object(
+            web.rtcm_manager,
+            "start_realtime_parsing",
+            return_value=True,
+        ) as start_parser:
+            response = flask_client.post("/api/mount/TEST/rtcm-parse/start")
+
+        self.assertEqual(response.status_code, 200)
+        start_parser.assert_called_once()
+        self.assertEqual(start_parser.call_args.kwargs["mount_name"], "TEST")
+        self.assertTrue(callable(start_parser.call_args.kwargs["push_callback"]))
+
+    def test_web_manager_shutdown_still_stops_listener_and_push_thread(self):
+        with (
+            mock.patch.object(self.web_manager, "stop_web_server") as stop_server,
+            mock.patch.object(self.web_manager, "stop_rtcm_parsing") as stop_push,
+        ):
+            self.web_manager.stop()
+
+        stop_server.assert_called_once_with()
+        stop_push.assert_called_once_with()
+
+    def test_disconnect_does_not_touch_ntrip_forwarding_services(self):
+        _, socket_client = self._make_socket_client()
+
+        with (
+            mock.patch.object(web.forwarder, "stop_forwarder") as stop_forwarder,
+            mock.patch.object(web.forwarder, "remove_mount_buffer") as remove_buffer,
+            mock.patch.object(web.forwarder, "force_disconnect_user") as disconnect_user,
+            mock.patch.object(web.forwarder, "force_disconnect_mount") as disconnect_mount,
+        ):
+            socket_client.disconnect()
+
+        self.stop_parser.assert_not_called()
+        stop_forwarder.assert_not_called()
+        remove_buffer.assert_not_called()
+        disconnect_user.assert_not_called()
+        disconnect_mount.assert_not_called()
+
+
 if __name__ == "__main__":
     unittest.main()

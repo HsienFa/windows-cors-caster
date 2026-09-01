@@ -1331,19 +1331,9 @@ class WebManager:
             from flask import session
             client_id = session.get('sid', 'unknown')
             log_web_request('websocket', 'disconnect', client_id, 'WebSocket 用戶端中斷連線')
-            
-            # 当WebSocket连接断开时，自动清理Web解析线程
-            try:
-                # 获取当前活跃的Web解析挂载点
-                current_web_mount = rtcm_manager.get_current_web_mount()
-                if current_web_mount:
-                    log_info(f"WebSocket 中斷連線，自動清理 Web 解析執行緒 [掛載點：{current_web_mount}]")
-                    rtcm_manager.stop_realtime_parsing()
-                    log_system_event(f"WebSocket 中斷連線後已自動清理 Web 解析執行緒：{current_web_mount}")
-                else:
-                    log_debug("WebSocket断开连接，但没有活跃的Web解析线程需要清理")
-            except Exception as e:
-                log_error(f"WebSocket 中斷連線時清理 Web 解析執行緒失敗：{e}")
+            # Web parser 是全域管理服務，不屬於單一瀏覽器連線。
+            # 其生命週期僅由登入保護的 start/stop API 與正式關機流程管理。
+            log_debug("WebSocket 用戶端已中斷；保留全域 Web 解析執行緒")
         
         @self.socketio.on('request_mount_data')
         def handle_request_mount_data(data):
