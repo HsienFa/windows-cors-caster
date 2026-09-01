@@ -70,7 +70,16 @@ class RTCM2ParserManager:
 
                 else:
                     log_info(f"已關閉 RTCM 資料解析 [掛載點：{mount_name}]")
-             
+
+    def wait_for_parser_startup(self, mount_name: str, timeout: float) -> str:
+        """Wait for parser startup without holding the parser manager lock."""
+        with self.lock:
+            parser = self.parsers.get(mount_name)
+
+        if parser is None:
+            return "failed"
+        return parser.wait_for_startup(timeout)
+
     def get_result(self, mount_name: str) -> Optional[Dict]:
         """获取解析结果（兼容原接口）"""
         with self.lock:

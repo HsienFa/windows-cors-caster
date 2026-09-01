@@ -21,6 +21,13 @@ from . import forwarder
 from . import logger
 from .logger import log_debug, log_info, log_warning, log_error, log_critical
 
+
+PARSER_STARTUP_PENDING = "pending"
+PARSER_STARTUP_READY = "ready"
+PARSER_STARTUP_FAILED = "failed"
+PARSER_STARTUP_STOPPED = "stopped"
+PARSER_STARTUP_TIMEOUT = "timeout"
+
 # 国家代码映射表（2字符 -> 3字符）- ISO 3166-1 完整映射
 COUNTRY_CODE_MAP = {
     # 亚洲
@@ -173,6 +180,9 @@ class RTCMParserThread(threading.Thread):
         # 线程控制
         self.running = threading.Event()
         self.running.set()
+        self.startup_complete = threading.Event()
+        self._startup_state = PARSER_STARTUP_PENDING
+        self._startup_lock = threading.Lock()
         
         # 解析结果存储
         self.result: Dict = {
@@ -204,12 +214,26 @@ class RTCMParserThread(threading.Thread):
 
     def run(self):
         """线程主逻辑"""
-        log_info(f"啟動解析執行緒 [掛載點：{self.mount_name}，模式：{self.mode}]")
+        subscriber_registered = False
+        stream = None
         try:
-            # 注册数据订阅
-            forwarder.register_subscriber(self.mount_name, self.pipe_w)
+            log_info(f"啟動解析執行緒 [掛載點：{self.mount_name}，模式：{self.mode}]")
+            if not self.running.is_set():
+                self._complete_startup(PARSER_STARTUP_STOPPED)
+                return
+
             stream = self.pipe_r.makefile("rb")
             reader = RTCMReader(stream)
+            if not self.running.is_set():
+                self._complete_startup(PARSER_STARTUP_STOPPED)
+                return
+
+            # Reader 先完成建立，再註冊資料訂閱；ready 後才允許 NTRIP
+            # upload caller 傳送 initial tail。
+            forwarder.register_subscriber(self.mount_name, self.pipe_w)
+            subscriber_registered = True
+            if not self._complete_startup(PARSER_STARTUP_READY):
+                return
             self.start_time = time.time()
 
             while self.running.is_set():
@@ -273,13 +297,47 @@ class RTCMParserThread(threading.Thread):
                         log_error(f"訊息解析錯誤 [掛載點：{self.mount_name}]：{error_msg}")
 
         except Exception as e:
+            self._complete_startup(PARSER_STARTUP_FAILED)
             log_error(f"解析執行緒發生例外 [掛載點：{self.mount_name}]：{str(e)}")
         finally:
+            self._complete_startup(PARSER_STARTUP_STOPPED)
             # 清理资源
-            forwarder.unregister_subscriber(self.mount_name, self.pipe_w)
-            self.pipe_r.close()
-            self.pipe_w.close()
+            if subscriber_registered:
+                try:
+                    forwarder.unregister_subscriber(self.mount_name, self.pipe_w)
+                except Exception as cleanup_error:
+                    log_error(f"移除解析資料訂閱失敗 [掛載點：{self.mount_name}]：{cleanup_error}")
+            if stream is not None:
+                try:
+                    stream.close()
+                except Exception:
+                    pass
+            try:
+                self.pipe_r.close()
+            finally:
+                self.pipe_w.close()
             log_info(f"解析執行緒停止 [掛載點：{self.mount_name}]")
+
+    @property
+    def startup_state(self) -> str:
+        """Return the parser startup state without exposing mutable state."""
+        with self._startup_lock:
+            return self._startup_state
+
+    def _complete_startup(self, state: str) -> bool:
+        """Complete startup exactly once with ready, failed, or stopped."""
+        with self._startup_lock:
+            if self._startup_state != PARSER_STARTUP_PENDING:
+                return False
+            self._startup_state = state
+            self.startup_complete.set()
+            return True
+
+    def wait_for_startup(self, timeout: float) -> str:
+        """Wait up to timeout seconds without changing a pending startup state."""
+        if not self.startup_complete.wait(timeout):
+            return PARSER_STARTUP_TIMEOUT
+        return self.startup_state
 
     def _get_msg_id(self, msg: RTCMMessage) -> Optional[int]:
         """获取消息ID（安全处理）"""
@@ -652,7 +710,12 @@ class RTCMParserThread(threading.Thread):
     def stop(self) -> None:
         """停止解析线程"""
         self.running.clear()
-        self.join(timeout=5)
+        self._complete_startup(PARSER_STARTUP_STOPPED)
+        if self.ident is not None:
+            self.join(timeout=5)
+        else:
+            self.pipe_r.close()
+            self.pipe_w.close()
         log_info(f"[掛載點：{self.mount_name}，解析執行緒已關閉]")
 
 
@@ -661,12 +724,22 @@ def start_str_fix_parser(mount_name: str, duration: int = 30,
                          callback: Optional[Callable[[Dict], None]] = None) -> RTCMParserThread:
     """启动STR修正模式解析线程"""
     parser = RTCMParserThread(mount_name, mode="str_fix", duration=duration, push_callback=callback)
-    parser.start()
+    try:
+        parser.start()
+    except Exception:
+        parser._complete_startup(PARSER_STARTUP_FAILED)
+        parser.stop()
+        raise
     return parser
 
 
 def start_web_parser(mount_name: str, callback: Optional[Callable[[Dict], None]] = None) -> RTCMParserThread:
     """启动Web实时解析线程"""
     parser = RTCMParserThread(mount_name, mode="realtime_web", push_callback=callback)
-    parser.start()
+    try:
+        parser.start()
+    except Exception:
+        parser._complete_startup(PARSER_STARTUP_FAILED)
+        parser.stop()
+        raise
     return parser
