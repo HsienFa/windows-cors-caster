@@ -78,11 +78,12 @@ class FakeSocket:
     def __init__(
         self,
         request_data=b"",
+        recv_items=None,
         recv_error=None,
         send_error=None,
         sendall_error=None,
     ):
-        self.request_data = request_data
+        self.recv_items = list(recv_items) if recv_items is not None else [request_data]
         self.recv_error = recv_error
         self.send_error = send_error
         self.sendall_error = sendall_error
@@ -98,7 +99,15 @@ class FakeSocket:
     def recv(self, size):
         if self.recv_error is not None:
             raise self.recv_error
-        return self.request_data
+        if not self.recv_items:
+            return b""
+        item = self.recv_items.pop(0)
+        if isinstance(item, BaseException):
+            raise item
+        if len(item) > size:
+            self.recv_items.insert(0, item[size:])
+            return item[:size]
+        return item
 
     def send(self, data):
         if self.send_error is not None:
@@ -150,6 +159,56 @@ class NtripMalformedRequestTests(unittest.TestCase):
     def test_initial_recv_reset_ends_without_error_response_or_error_log(self):
         client_socket = FakeSocket(
             recv_error=ConnectionResetError(10054, "connection reset")
+        )
+        handler, database = self._make_handler(client_socket)
+        self._block_request_routing(handler)
+
+        with (
+            mock.patch.object(ntrip, "log_error") as handler_error_log,
+            mock.patch.object(ntrip.logger, "log_error") as logger_error_log,
+        ):
+            handler.handle_request()
+
+        handler.send_error_response.assert_not_called()
+        handler_error_log.assert_not_called()
+        logger_error_log.assert_not_called()
+        self._assert_request_did_not_route(handler, database)
+        self.assertTrue(client_socket.closed)
+
+    def test_header_over_size_limit_is_closed_without_routing(self):
+        oversized_header = (
+            b"GET /base HTTP/1.1\r\nX-Synthetic: "
+            + b"a" * ntrip.MAX_INITIAL_HEADER_SIZE
+        )
+        client_socket = FakeSocket(recv_items=[oversized_header])
+        handler, database = self._make_handler(client_socket)
+        self._block_request_routing(handler)
+
+        handler.handle_request()
+
+        handler.send_error_response.assert_not_called()
+        self._assert_request_did_not_route(handler, database)
+        self.assertTrue(client_socket.closed)
+
+    def test_eof_before_header_boundary_is_closed_without_routing(self):
+        client_socket = FakeSocket(
+            recv_items=[b"GET /base HTTP/1.1\r\nHost: synthetic.invalid"]
+        )
+        handler, database = self._make_handler(client_socket)
+        self._block_request_routing(handler)
+
+        handler.handle_request()
+
+        handler.send_error_response.assert_not_called()
+        self._assert_request_did_not_route(handler, database)
+        self.assertTrue(client_socket.closed)
+
+    def test_reset_during_fragmented_header_ends_without_error_response(self):
+        client_socket = FakeSocket(
+            recv_items=[
+                b"GET /base HTTP/1.1\r\n",
+                ConnectionResetError(10054, "connection reset"),
+            ]
         )
         handler, database = self._make_handler(client_socket)
         self._block_request_routing(handler)

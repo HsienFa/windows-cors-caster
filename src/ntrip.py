@@ -29,6 +29,10 @@ VERSION = config.VERSION
 NTRIP_PORT = config.NTRIP_PORT
 WEB_PORT = config.WEB_PORT
 BUFFER_SIZE = config.BUFFER_SIZE
+MAX_INITIAL_HEADER_SIZE = 64 * 1024
+INITIAL_HEADER_DELIMITER = b'\r\n\r\n'
+# This bounds only the parser startup Event wait, not end-to-end upload startup.
+NTRIP_PARSER_STARTUP_EVENT_WAIT_TIMEOUT_SECONDS = 0.5
 
 
 class AntiSpamLogger:
@@ -159,30 +163,68 @@ class NTRIPHandler:
         if suppressed > 0:
             message += f"（已抑制 {suppressed} 筆相似訊息）"
         logger.log_debug(message, 'ntrip')
-    
+
+    def _receive_initial_request(self):
+        """Receive one bounded request header and preserve any binary tail."""
+        request_buffer = bytearray()
+
+        while True:
+            remaining = MAX_INITIAL_HEADER_SIZE - len(request_buffer)
+            if remaining <= 0:
+                log_debug(f"客户端 {self.client_address} 初始請求標頭超過大小上限")
+                self._cleanup()
+                return None
+
+            try:
+                request_chunk = self.client_socket.recv(min(BUFFER_SIZE, remaining))
+            except OSError as e:
+                if not self._is_peer_disconnect_error(e):
+                    raise
+                self._log_peer_disconnect("接收初始請求")
+                self._cleanup()
+                return None
+
+            if not request_chunk:
+                if not request_buffer:
+                    log_debug(f"客户端 {self.client_address} 发送空请求")
+                    self._cleanup()
+                    return None
+
+                log_debug(f"客户端 {self.client_address} 在初始請求標頭完成前結束連線")
+                return bytes(request_buffer), b'', False
+
+            request_buffer.extend(request_chunk)
+            delimiter_index = request_buffer.find(INITIAL_HEADER_DELIMITER)
+            if delimiter_index >= 0:
+                header_end = delimiter_index + len(INITIAL_HEADER_DELIMITER)
+                if header_end > MAX_INITIAL_HEADER_SIZE:
+                    log_debug(f"客户端 {self.client_address} 初始請求標頭超過大小上限")
+                    self._cleanup()
+                    return None
+                return (
+                    bytes(request_buffer[:delimiter_index]),
+                    bytes(request_buffer[header_end:]),
+                    True,
+                )
+
+            if len(request_buffer) >= MAX_INITIAL_HEADER_SIZE:
+                log_debug(f"客户端 {self.client_address} 初始請求標頭超過大小上限")
+                self._cleanup()
+                return None
+
     def handle_request(self):
         """处理NTRIP请求，增强验证和错误处理"""
         try:
             # 改为debug级别，避免频繁日志
             log_debug(f"=== 开始处理请求 {self.client_address} ===")
 
-            try:
-                request_bytes = self.client_socket.recv(BUFFER_SIZE)
-            except OSError as e:
-                if not self._is_peer_disconnect_error(e):
-                    raise
-                self._log_peer_disconnect("接收初始請求")
-                self._cleanup()
+            initial_request = self._receive_initial_request()
+            if initial_request is None:
                 return
 
-            if not request_bytes:
-                log_debug(f"客户端 {self.client_address} 发送空请求")
-                self._cleanup()
-                return
-
-            request_data = request_bytes.decode('utf-8', errors='ignore')
-            header_bytes, separator, request_body = request_bytes.partition(b'\r\n\r\n')
+            header_bytes, request_body, header_complete = initial_request
             header_data = header_bytes.decode('utf-8', errors='ignore')
+            request_data = header_data
             request_parts = header_data.split(None, 1)
             if not request_parts:
                 log_debug(f"客户端 {self.client_address} 未发送有效请求行")
@@ -190,9 +232,8 @@ class NTRIPHandler:
                 return
 
             request_method = request_parts[0].upper()
-            if separator and request_method == 'GET':
+            if header_complete and request_method == 'GET':
                 self._initial_rover_data = request_body
-                request_data = header_data
 
             lines = request_data.strip().split('\r\n')
             if not lines or not lines[0].strip():
@@ -208,6 +249,13 @@ class NTRIPHandler:
             except ValueError:
                 log_debug(f"请求行解析失败 {self.client_address}")
                 self.send_error_response(400, "Bad Request: Invalid request line")
+                if not header_complete:
+                    self._cleanup()
+                return
+
+            if not header_complete:
+                log_debug(f"客户端 {self.client_address} 未完成初始請求標頭")
+                self._cleanup()
                 return
 
             headers = self._parse_headers(lines[1:])
@@ -240,8 +288,8 @@ class NTRIPHandler:
             log_debug(f"请求验证通过 {self.client_address}: {method} {path} (协议: {self.protocol_type})")
 
             if method.upper() in ['SOURCE', 'POST']:
-                
-                self.handle_upload(path, headers)
+
+                self.handle_upload(path, headers, request_body)
             elif method.upper() == 'GET':
                
                 if self.protocol_type in ['ntrip1_0_http', 'ntrip2_0', 'ntrip1_0', 'ntrip0_8']:
@@ -1150,7 +1198,7 @@ a=control:*
 """
         return sdp
     
-    def handle_upload(self, path, headers):
+    def handle_upload(self, path, headers, initial_upload_data=b''):
         """处理上传请求"""
         try:
             # 使用防刷屏机制记录HANDLE_UPLOAD日志
@@ -1268,15 +1316,19 @@ a=control:*
                 return
 
             try:
-                manager.start_str_correction(mount)
+                manager.start_str_correction(
+                    mount,
+                    wait_for_ready=True,
+                    startup_event_wait_timeout=NTRIP_PARSER_STARTUP_EVENT_WAIT_TIMEOUT_SECONDS,
+                )
             except Exception as correction_error:
                 logger.log_warning(f"啟動掛載點 {mount} 的 STR 修正失敗，RTCM 接收將繼續：{correction_error}")
             
             username_for_log = getattr(self, 'username', mount) if hasattr(self, 'username') else mount
             logger.log_mount_operation('upload_connected', mount, username_for_log)
-            
+
             logger.log_info(f"=== 開始接收 RTCM 資料 ===：mount={mount}")
-            self._receive_rtcm_data(mount)
+            self._receive_rtcm_data(mount, initial_upload_data)
         
         except Exception as e:
             logger.log_error(f"處理上傳請求時發生例外：{e}", exc_info=True)
@@ -1359,12 +1411,17 @@ a=control:*
             logger.log_error(f"處理 HTTP GET 請求時發生例外：{e}", exc_info=True)
             self.send_error_response(500, "Internal Server Error")
     
-    def _receive_rtcm_data(self, mount):
+    def _receive_rtcm_data(self, mount, initial_data=b''):
         """接收RTCM数据循环"""
         try:
+            pending_data = initial_data
             while True:
                 try:
-                    data = self.client_socket.recv(BUFFER_SIZE)
+                    if pending_data:
+                        data = pending_data
+                        pending_data = b''
+                    else:
+                        data = self.client_socket.recv(BUFFER_SIZE)
                     if not data:
                         # 连接已关闭
                         logger.log_debug(f"挂载点 {mount} 连接已关闭", 'ntrip')

@@ -753,7 +753,12 @@ class ConnectionManager:
                 'users': user_stats
             }
     
-    def start_str_correction(self, mount_name: str):
+    def start_str_correction(
+        self,
+        mount_name: str,
+        wait_for_ready: bool = False,
+        startup_event_wait_timeout: float = 0.0,
+    ):
         """启动30秒RTCM解析并修正STR"""
         if mount_name not in self.online_mounts:
             log_warning(f"無法啟動 STR 修正，掛載點 {mount_name} 不在線上")
@@ -794,6 +799,12 @@ class ConnectionManager:
             log_debug(f"STR修正流程完成 [挂载点: {mount_name}]")
         
         threading.Thread(target=wait_and_correct, daemon=True).start()
+
+        if wait_for_ready:
+            rtcm_manager.wait_for_parser_startup(
+                mount_name,
+                startup_event_wait_timeout,
+            )
 
     def _process_str_data(self, mount_name: str, parse_result: dict, mode: str = "correct"):
         """统一的STR处理函数：支持初始生成、修正和重新生成模式

@@ -1,5 +1,6 @@
 """NTRIP SOURCE upload socket lifecycle regression tests."""
 
+import hashlib
 import os
 import inspect
 import socket
@@ -67,6 +68,7 @@ _CONFIG_PATH.write_text(
 _PREVIOUS_CONFIG = os.environ.get("NTRIP_CONFIG_FILE")
 os.environ["NTRIP_CONFIG_FILE"] = str(_CONFIG_PATH)
 try:
+    from pyrtcm import RTCMReader, calc_crc24q, crc2bytes, len2bytes
     from src import connection, ntrip
     from src.network_utils import ConnectionInspectionResult
 finally:
@@ -74,6 +76,72 @@ finally:
         os.environ.pop("NTRIP_CONFIG_FILE", None)
     else:
         os.environ["NTRIP_CONFIG_FILE"] = _PREVIOUS_CONFIG
+
+
+SOURCE_HEADER = (
+    b"SOURCE /TEST\r\n"
+    b"Source-Agent: synthetic-framing-test\r\n\r\n"
+)
+
+
+def _sha256(data):
+    return hashlib.sha256(data).hexdigest()
+
+
+def _make_synthetic_rtcm3_frame(station_id=0):
+    """Build a coordinate-free synthetic RTCM 1005 frame with valid CRC24Q."""
+    payload_bit_length = 152
+    payload_value = (1005 << (payload_bit_length - 12)) | (
+        station_id << (payload_bit_length - 24)
+    )
+    payload = payload_value.to_bytes(payload_bit_length // 8, "big")
+    message_without_crc = b"\xd3" + len2bytes(payload) + payload
+    return message_without_crc + crc2bytes(message_without_crc)
+
+
+class ScriptedRecvSocket:
+    """Minimal socket double that returns deterministic recv chunks in order."""
+
+    def __init__(self, recv_chunks, events):
+        self.recv_chunks = list(recv_chunks)
+        self.events = events
+        self.writes = []
+        self.closed = False
+
+    def settimeout(self, value):
+        return None
+
+    def setsockopt(self, *args):
+        return None
+
+    def recv(self, size):
+        if not self.recv_chunks:
+            return b""
+        item = self.recv_chunks.pop(0)
+        if isinstance(item, BaseException):
+            raise item
+        if len(item) > size:
+            self.recv_chunks.insert(0, item[size:])
+            return item[:size]
+        return item
+
+    def send(self, data):
+        self._record_write(data)
+        return len(data)
+
+    def sendall(self, data):
+        self._record_write(data)
+
+    def _record_write(self, data):
+        self.writes.append(data)
+        if data.startswith((b"ICY 200 OK", b"HTTP/1.1 200 OK")):
+            self.events.append("handshake")
+
+    def shutdown(self, how):
+        self.events.append("cleanup")
+
+    def close(self):
+        self.closed = True
 
 
 class NtripUploadLifecycleTests(unittest.TestCase):
@@ -218,14 +286,359 @@ class NtripUploadLifecycleTests(unittest.TestCase):
         self.assertIn("start_correction=False", source)
         self.assertLess(
             source.index("self.send_upload_success_response()"),
-            source.index("manager.start_str_correction(mount)"),
+            source.index("manager.start_str_correction("),
         )
+        self.assertIn("wait_for_ready=True", source)
+        self.assertIn("NTRIP_PARSER_STARTUP_EVENT_WAIT_TIMEOUT_SECONDS", source)
+
+    def test_non_ntrip_correction_caller_does_not_wait_for_readiness(self):
+        self.manager.online_mounts["TEST"] = mock.Mock()
+        waiter_thread = mock.Mock()
+
+        with (
+            mock.patch.object(connection.rtcm_manager, "start_parser", return_value=True),
+            mock.patch.object(connection.rtcm_manager, "wait_for_parser_startup") as wait_for_startup,
+            mock.patch.object(connection.threading, "Thread", return_value=waiter_thread),
+        ):
+            result = connection.ConnectionManager.start_str_correction(
+                self.manager,
+                "TEST",
+            )
+
+        self.assertIsNone(result)
+        wait_for_startup.assert_not_called()
+        waiter_thread.start.assert_called_once_with()
+
+    def test_ntrip_readiness_wait_preserves_start_correction_none_return(self):
+        self.manager.online_mounts["TEST"] = mock.Mock()
+        waiter_thread = mock.Mock()
+
+        with (
+            mock.patch.object(connection.rtcm_manager, "start_parser", return_value=True),
+            mock.patch.object(
+                connection.rtcm_manager,
+                "wait_for_parser_startup",
+                return_value="timeout",
+            ) as wait_for_startup,
+            mock.patch.object(connection.threading, "Thread", return_value=waiter_thread),
+        ):
+            result = connection.ConnectionManager.start_str_correction(
+                self.manager,
+                "TEST",
+                wait_for_ready=True,
+                startup_event_wait_timeout=0.5,
+            )
+
+        self.assertIsNone(result)
+        wait_for_startup.assert_called_once_with("TEST", 0.5)
+        waiter_thread.start.assert_called_once_with()
 
     def test_receive_loop_has_no_delayed_mount_name_only_cleanup(self):
         source = (PROJECT_ROOT / "src" / "ntrip.py").read_text(encoding="utf-8")
 
         self.assertNotIn("threading.Timer(1.5", source)
         self.assertIn("expected_socket=self.client_socket", source)
+
+
+class NtripSourceTcpFramingTests(unittest.TestCase):
+    def setUp(self):
+        self.manager = connection.ConnectionManager()
+        self.manager._generate_initial_str = mock.Mock()
+        self.manager.cleanup_zombie_connections = mock.Mock(return_value=True)
+        self.manager.force_refresh_connections = mock.Mock()
+        self.manager.update_mount_data_stats = mock.Mock()
+        self.manager.start_str_correction = mock.Mock()
+
+    def _run_source_session(self, recv_chunks, correction_result="ready", correction_error=None):
+        events = []
+        client_socket = ScriptedRecvSocket(recv_chunks, events)
+        handler = ntrip.NTRIPHandler(
+            client_socket,
+            ("127.0.0.1", 32003),
+            mock.Mock(),
+        )
+
+        def verify_user(*args, **kwargs):
+            events.append("authentication")
+            return True, "verified"
+
+        def start_correction(mount, **kwargs):
+            events.append("correction_started")
+            self.last_correction_call = (mount, kwargs)
+            if correction_error is not None:
+                raise correction_error
+            return correction_result
+
+        forwarded_chunks = []
+
+        def capture_upload(mount, data):
+            events.append("forwarding")
+            forwarded_chunks.append(data)
+
+        handler.verify_user = mock.Mock(side_effect=verify_user)
+        self.manager.start_str_correction = mock.Mock(side_effect=start_correction)
+
+        with (
+            mock.patch.object(
+                ntrip.connection,
+                "get_connection_manager",
+                return_value=self.manager,
+            ),
+            mock.patch.object(
+                ntrip.forwarder,
+                "upload_data",
+                side_effect=capture_upload,
+            ),
+            mock.patch.object(ntrip.forwarder, "remove_mount_buffer"),
+        ):
+            handler.handle_request()
+
+        handler.verify_user.assert_called_once()
+        self.assertEqual(len(client_socket.writes), 1)
+        self.assertTrue(client_socket.writes[0].startswith(b"ICY 200 OK\r\n"))
+        self.manager.start_str_correction.assert_called_once_with(
+            "TEST",
+            wait_for_ready=True,
+            startup_event_wait_timeout=(
+                ntrip.NTRIP_PARSER_STARTUP_EVENT_WAIT_TIMEOUT_SECONDS
+            ),
+        )
+        self.assertLess(events.index("authentication"), events.index("handshake"))
+        self.assertLess(events.index("handshake"), events.index("correction_started"))
+        if "forwarding" in events:
+            self.assertLess(events.index("correction_started"), events.index("forwarding"))
+        self.assertLess(events.index("correction_started"), events.index("cleanup"))
+        self.assertFalse(self.manager.is_mount_online("TEST"))
+        self.assertTrue(client_socket.closed)
+
+        self.last_forwarded_chunks = list(forwarded_chunks)
+        return b"".join(forwarded_chunks)
+
+    def _assert_valid_synthetic_frame(self, frame, station_id):
+        self.assertEqual(calc_crc24q(frame), 0)
+        parsed = RTCMReader.parse(frame)
+        self.assertEqual(parsed.identity, "1005")
+        self.assertEqual(parsed.DF003, station_id)
+
+    def _assert_forwarded_bytes_unchanged(self, expected, actual, scenario):
+        details = (
+            f"{scenario}: expected_len={len(expected)}, actual_len={len(actual)}, "
+            f"expected_sha256={_sha256(expected)}, actual_sha256={_sha256(actual)}"
+        )
+        self.assertEqual(len(actual), len(expected), details)
+        self.assertEqual(_sha256(actual), _sha256(expected), details)
+
+    def test_source_header_and_complete_rtcm_frame_in_one_recv_preserves_tail(self):
+        frame = _make_synthetic_rtcm3_frame(station_id=1)
+        self._assert_valid_synthetic_frame(frame, station_id=1)
+
+        forwarded = self._run_source_session([SOURCE_HEADER + frame])
+
+        self._assert_forwarded_bytes_unchanged(
+            frame,
+            forwarded,
+            "complete initial RTCM tail",
+        )
+
+    def test_source_header_and_partial_rtcm_frame_in_one_recv_preserves_tail(self):
+        frame = _make_synthetic_rtcm3_frame(station_id=2)
+        self._assert_valid_synthetic_frame(frame, station_id=2)
+        split_at = 8
+
+        forwarded = self._run_source_session(
+            [SOURCE_HEADER + frame[:split_at], frame[split_at:]]
+        )
+
+        self._assert_forwarded_bytes_unchanged(
+            frame,
+            forwarded,
+            "partial initial RTCM tail",
+        )
+
+    def test_fragmented_source_header_never_enters_forwarding(self):
+        frame = _make_synthetic_rtcm3_frame(station_id=3)
+        self._assert_valid_synthetic_frame(frame, station_id=3)
+        split_at = SOURCE_HEADER.index(b"synthetic-framing") + len(b"synthetic")
+        header_prefix = SOURCE_HEADER[:split_at]
+        header_suffix = SOURCE_HEADER[split_at:]
+
+        forwarded = self._run_source_session(
+            [header_prefix, header_suffix + frame]
+        )
+
+        self._assert_forwarded_bytes_unchanged(
+            frame,
+            forwarded,
+            "fragmented SOURCE header",
+        )
+
+    def test_first_rtcm_frame_fragmented_after_header_is_byte_exact(self):
+        frame = _make_synthetic_rtcm3_frame(station_id=4)
+        self._assert_valid_synthetic_frame(frame, station_id=4)
+
+        forwarded = self._run_source_session(
+            [SOURCE_HEADER, frame[:5], frame[5:13], frame[13:]]
+        )
+
+        self._assert_forwarded_bytes_unchanged(
+            frame,
+            forwarded,
+            "fragmented RTCM frame after header",
+        )
+        self._assert_valid_synthetic_frame(forwarded, station_id=4)
+
+    def test_multiple_rtcm_frames_in_initial_recv_are_byte_exact(self):
+        first_frame = _make_synthetic_rtcm3_frame(station_id=5)
+        second_frame = _make_synthetic_rtcm3_frame(station_id=6)
+        self._assert_valid_synthetic_frame(first_frame, station_id=5)
+        self._assert_valid_synthetic_frame(second_frame, station_id=6)
+        expected = first_frame + second_frame
+
+        forwarded = self._run_source_session([SOURCE_HEADER + expected])
+
+        self._assert_forwarded_bytes_unchanged(
+            expected,
+            forwarded,
+            "multiple initial RTCM frames",
+        )
+
+    def test_readiness_timeout_is_bounded_and_initial_tail_is_forwarded_once(self):
+        frame = _make_synthetic_rtcm3_frame(station_id=8)
+
+        forwarded = self._run_source_session(
+            [SOURCE_HEADER + frame],
+            correction_result="timeout",
+        )
+
+        self._assert_forwarded_bytes_unchanged(frame, forwarded, "readiness timeout")
+        self.assertEqual(self.last_forwarded_chunks, [frame])
+        mount, kwargs = self.last_correction_call
+        self.assertEqual(mount, "TEST")
+        self.assertTrue(kwargs["wait_for_ready"])
+        self.assertEqual(
+            kwargs["startup_event_wait_timeout"],
+            ntrip.NTRIP_PARSER_STARTUP_EVENT_WAIT_TIMEOUT_SECONDS,
+        )
+        self.assertLessEqual(kwargs["startup_event_wait_timeout"], 0.5)
+
+    def test_parser_start_failure_states_do_not_block_initial_tail(self):
+        frame = _make_synthetic_rtcm3_frame(station_id=9)
+
+        for startup_state in ("failed", "stopped"):
+            with self.subTest(startup_state=startup_state):
+                forwarded = self._run_source_session(
+                    [SOURCE_HEADER + frame],
+                    correction_result=startup_state,
+                )
+                self._assert_forwarded_bytes_unchanged(
+                    frame,
+                    forwarded,
+                    f"parser {startup_state}",
+                )
+                self.assertEqual(self.last_forwarded_chunks, [frame])
+
+    def test_synchronous_parser_start_exception_is_fail_open(self):
+        frame = _make_synthetic_rtcm3_frame(station_id=10)
+
+        forwarded = self._run_source_session(
+            [SOURCE_HEADER + frame],
+            correction_error=RuntimeError("synthetic parser startup failure"),
+        )
+
+        self._assert_forwarded_bytes_unchanged(frame, forwarded, "parser exception")
+        self.assertEqual(self.last_forwarded_chunks, [frame])
+
+    def test_fragmented_get_header_routes_only_after_complete_boundary(self):
+        events = []
+        client_socket = ScriptedRecvSocket(
+            [
+                b"GET /base HTTP/1.0\r\nUser-Agent: NTRIP synthetic",
+                b"/1.0\r\n\r\n",
+            ],
+            events,
+        )
+        handler = ntrip.NTRIPHandler(
+            client_socket,
+            ("127.0.0.1", 32004),
+            mock.Mock(),
+        )
+        handler.handle_download = mock.Mock()
+        handler.send_error_response = mock.Mock()
+
+        handler.handle_request()
+
+        handler.handle_download.assert_called_once()
+        self.assertEqual(handler.handle_download.call_args.args[0], "/base")
+        self.assertEqual(handler.protocol_type, "ntrip1_0_http")
+        handler.send_error_response.assert_not_called()
+        client_socket.close()
+
+    def test_get_header_and_initial_rover_gga_in_one_recv_preserve_body(self):
+        initial_gga = b"$GPGGA,SYNTHETIC-NO-POSITION*00\r\n"
+        expected_length = len(initial_gga)
+        expected_hash = _sha256(initial_gga)
+        client_socket = ScriptedRecvSocket(
+            [
+                b"GET /base HTTP/1.0\r\n"
+                b"User-Agent: NTRIP synthetic/1.0\r\n\r\n"
+                + initial_gga
+            ],
+            [],
+        )
+        handler = ntrip.NTRIPHandler(
+            client_socket,
+            ("127.0.0.1", 32005),
+            mock.Mock(),
+        )
+        observed_initial_data = []
+
+        def capture_download(path, headers):
+            observed_initial_data.append(handler._initial_rover_data)
+
+        handler.handle_download = mock.Mock(side_effect=capture_download)
+        handler.send_error_response = mock.Mock()
+
+        handler.handle_request()
+
+        handler.handle_download.assert_called_once()
+        self.assertEqual(len(observed_initial_data), 1)
+        self.assertEqual(len(observed_initial_data[0]), expected_length)
+        self.assertEqual(_sha256(observed_initial_data[0]), expected_hash)
+        handler.send_error_response.assert_not_called()
+        client_socket.close()
+
+    def test_unauthenticated_source_tail_never_enters_forwarding(self):
+        frame = _make_synthetic_rtcm3_frame(station_id=7)
+        self._assert_valid_synthetic_frame(frame, station_id=7)
+        events = []
+        client_socket = ScriptedRecvSocket([SOURCE_HEADER + frame], events)
+        handler = ntrip.NTRIPHandler(
+            client_socket,
+            ("127.0.0.1", 32006),
+            mock.Mock(),
+        )
+        handler.verify_user = mock.Mock(return_value=(False, "rejected"))
+        handler.send_auth_challenge = mock.Mock()
+        upload_data = mock.Mock()
+
+        with (
+            mock.patch.object(
+                ntrip.connection,
+                "get_connection_manager",
+                return_value=self.manager,
+            ),
+            mock.patch.object(ntrip.forwarder, "upload_data", upload_data),
+            mock.patch.object(ntrip.forwarder, "remove_mount_buffer"),
+        ):
+            handler.handle_request()
+
+        handler.verify_user.assert_called_once()
+        handler.send_auth_challenge.assert_called_once_with("rejected")
+        upload_data.assert_not_called()
+        self.manager.start_str_correction.assert_not_called()
+        self.assertNotIn("handshake", events)
+        self.assertFalse(self.manager.is_mount_online("TEST"))
+        self.assertTrue(client_socket.closed)
 
 
 if __name__ == "__main__":
