@@ -100,11 +100,14 @@ class GitHubActionsWorkflowTests(unittest.TestCase):
             "test_traditional_chinese_ui.py",
             "test_configurable_branding.py",
             "test_security_regressions.py",
+            "test_socketio_security.py",
             "test_frontend_offline_privacy.py",
             "test_deployment_and_policy.py",
             "test_ci_workflow.py",
             "test_ntrip_upload_lifecycle.py",
             "test_ntrip_download_lifecycle.py",
+            "test_ntrip_malformed_requests.py",
+            "test_rtcm_parser_readiness.py",
             "test_rover_gga.py",
             "test_rover_web_api.py",
             "test_rover_frontend.py",
@@ -115,6 +118,16 @@ class GitHubActionsWorkflowTests(unittest.TestCase):
         self.assertIn("python -m pip install -r requirements.txt", self.source)
         self.assertIn("ast.parse(source, filename=relative_path)", self.source)
         self.assertIn("node --check", self.source)
+
+    def test_socketio_security_and_dependency_checks_run_on_both_platforms(self):
+        for job_name in ("application-tests", "windows-native-tests"):
+            with self.subTest(job=job_name):
+                job = self._job_source(job_name)
+                self.assertIn("python -m pip check", job)
+                self.assertIn(
+                    'python -m unittest discover -s tests -p "test_socketio_security.py"',
+                    job,
+                )
 
     def test_whitespace_check_uses_feature_base_and_rejects_new_violations(self):
         application_job = self._job_source("application-tests")

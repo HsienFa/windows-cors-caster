@@ -330,6 +330,122 @@ class SocketIOParserLifecycleTests(unittest.TestCase):
         self.addCleanup(self._disconnect_if_connected, socket_client)
         return flask_client, socket_client
 
+    def _assert_socket_rooms(self, socket_client, authenticated):
+        manager = self.web_manager.socketio.server.manager
+        sid = manager.sid_from_eio_sid(socket_client.eio_sid, "/")
+        self.assertIsNotNone(sid)
+        rooms = manager.get_rooms(sid, "/")
+        self.assertIn("data_push", rooms)
+        self.assertEqual("admin_data" in rooms, authenticated)
+        return sid
+
+    def test_socketio_public_and_admin_room_delivery_remains_separate(self):
+        _, anonymous = self._make_socket_client()
+        _, administrator = self._make_socket_client(authenticated=True)
+        self._assert_socket_rooms(anonymous, authenticated=False)
+        self._assert_socket_rooms(administrator, authenticated=True)
+        for client in (anonymous, administrator):
+            self.assertEqual(
+                [event["name"] for event in client.get_received()], ["status"],
+            )
+
+        self.web_manager.socketio.emit(
+            "synthetic_summary", {"count": 1}, to="data_push",
+        )
+        self.web_manager.push_log_message("synthetic administration event")
+        public_events = anonymous.get_received()
+        admin_events = administrator.get_received()
+        self.assertEqual([event["name"] for event in public_events], ["synthetic_summary"])
+        self.assertEqual(public_events[0]["args"], [{"count": 1}])
+        self.assertEqual(
+            [event["name"] for event in admin_events],
+            ["synthetic_summary", "log_message"],
+        )
+        self.assertEqual(
+            admin_events[1]["args"][0]["message"], "synthetic administration event",
+        )
+
+    def test_http_login_logout_and_socket_reconnect_preserve_session_rooms(self):
+        flask_client, socket_client = self._make_socket_client()
+        self._assert_socket_rooms(socket_client, authenticated=False)
+        socket_client.disconnect()
+
+        password = secrets.token_hex(12)
+        self.web_manager.db_manager.verify_admin.return_value = True
+        response = flask_client.post(
+            "/login?redirect=monitor",
+            data={"username": "syntheticadmin", "password": password},
+        )
+        self.assertEqual(response.status_code, 302)
+        self.assertTrue(response.location.endswith("/?page=monitor"))
+        self.web_manager.db_manager.verify_admin.assert_called_once_with(
+            "syntheticadmin", password,
+        )
+        with flask_client.session_transaction() as session:
+            self.assertTrue(session["admin_logged_in"])
+            self.assertEqual(session["admin_username"], "syntheticadmin")
+
+        socket_client.connect()
+        self.assertTrue(socket_client.is_connected())
+        admin_sid = self._assert_socket_rooms(socket_client, authenticated=True)
+        socket_client.disconnect()
+        response = flask_client.get("/logout")
+        self.assertEqual(response.status_code, 302)
+        with flask_client.session_transaction() as session:
+            self.assertNotIn("admin_logged_in", session)
+
+        socket_client.connect()
+        self.assertTrue(socket_client.is_connected())
+        anonymous_sid = self._assert_socket_rooms(socket_client, authenticated=False)
+        self.assertNotEqual(anonymous_sid, admin_sid)
+        socket_client.get_received()
+        self.web_manager.push_log_message("synthetic post-logout event")
+        self.assertEqual(socket_client.get_received(), [])
+        self.stop_parser.assert_not_called()
+
+    def test_failed_http_login_keeps_socket_connection_anonymous(self):
+        flask_client = self.web_manager.app.test_client()
+        self.web_manager.db_manager.verify_admin.return_value = False
+        response = flask_client.post(
+            "/login",
+            data={"username": "syntheticadmin", "password": secrets.token_hex(12)},
+        )
+        self.assertEqual(response.status_code, 200)
+        with flask_client.session_transaction() as session:
+            self.assertFalse(session.get("admin_logged_in", False))
+        socket_client = self.web_manager.socketio.test_client(
+            self.web_manager.app, flask_test_client=flask_client,
+        )
+        self.addCleanup(self._disconnect_if_connected, socket_client)
+        self.assertTrue(socket_client.is_connected())
+        self._assert_socket_rooms(socket_client, authenticated=False)
+
+    def test_socketio_data_event_callbacks_and_replies_survive_reconnect(self):
+        _, socket_client = self._make_socket_client()
+        parsed = {"message_count": 2}
+        statistics = {"bytes_received": 8}
+        with (
+            mock.patch.object(web.rtcm_manager, "get_parsed_mount_data", return_value=parsed),
+            mock.patch.object(web.rtcm_manager, "get_mount_statistics", return_value=statistics),
+        ):
+            for reconnect in (False, True):
+                with self.subTest(reconnect=reconnect):
+                    if reconnect:
+                        socket_client.disconnect()
+                        socket_client.connect()
+                        self.assertTrue(socket_client.is_connected())
+                    socket_client.get_received()
+                    acknowledgement = socket_client.emit(
+                        "request_mount_data", {"mount": "SYNTHETIC"}, callback=True,
+                    )
+                    self.assertEqual(acknowledgement, [])
+                    self.assertEqual(socket_client.get_received(), [{
+                        "name": "mount_data",
+                        "args": [{"mount": "SYNTHETIC", "data": parsed, "statistics": statistics}],
+                        "namespace": "/",
+                    }])
+        self.stop_parser.assert_not_called()
+
     def test_anonymous_disconnect_does_not_stop_active_web_parser(self):
         _, socket_client = self._make_socket_client()
 
