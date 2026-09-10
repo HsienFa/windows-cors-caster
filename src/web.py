@@ -11,6 +11,7 @@ import logging
 import math
 import psutil
 import re
+import secrets
 from datetime import datetime
 from functools import wraps
 from threading import Thread
@@ -125,18 +126,48 @@ def _public_online_user_summary(online_users):
     }
 
 
+def _public_number(value):
+    """Only allow finite numeric leaves, never nested internal objects."""
+    return value if type(value) in (int, float) and math.isfinite(value) else 0
+
+
+def _public_mount_summary(mount):
+    if not isinstance(mount, dict):
+        mount = {}
+    name = mount.get('mount_name')
+    status = mount.get('status')
+    return {
+        'mount_name': name if isinstance(name, str) else '',
+        'status': status if status in ('online', 'offline', 'validated') else 'unknown',
+        'user_count': _public_number(mount.get('user_count')),
+        'data_count': _public_number(mount.get('data_count')),
+        'uptime': _public_number(mount.get('uptime')),
+    }
+
+
 def _public_system_stats(stats):
-    """Remove per-user identities from system statistics used by public UI."""
+    """Build the public dashboard contract from explicit scalar allowlists."""
     if not isinstance(stats, dict):
         return {}
-    public_stats = dict(stats)
-    user_details = public_stats.pop('users', None)
-    public_stats['user_count'] = (
-        len(user_details)
-        if isinstance(user_details, (list, tuple, dict))
-        else 0
-    )
-    return public_stats
+    def numbers(container, fields):
+        values = stats.get(container)
+        values = values if isinstance(values, dict) else {}
+        return {field: _public_number(values.get(field)) for field in fields}
+
+    users = stats.get('users')
+    mounts = stats.get('mounts')
+    return {
+        'timestamp': _public_number(stats.get('timestamp')),
+        'uptime': _public_number(stats.get('uptime')),
+        'cpu_percent': _public_number(stats.get('cpu_percent')),
+        'memory': numbers('memory', ('percent', 'used', 'total')),
+        'network_bandwidth': numbers('network_bandwidth', ('sent_rate', 'recv_rate')),
+        'connections': numbers('connections', ('active', 'total', 'rejected', 'max_concurrent')),
+        'data_transfer': numbers('data_transfer', ('total_bytes',)),
+        'user_count': len(users) if isinstance(users, (list, tuple, dict)) else 0,
+        'mounts': [_public_mount_summary(mount) for mount in mounts]
+        if isinstance(mounts, (list, tuple)) else [],
+    }
 
 def set_server_instance(server):
     """设置服务器实例"""
@@ -170,6 +201,12 @@ class WebManager:
         self.app = Flask(__name__, static_folder=self.static_dir, static_url_path='/static')
         self.app.secret_key = config.FLASK_SECRET_KEY
         self.app.json.ensure_ascii = False
+        # One WebManager / process owns these grants. Restart requires a new login.
+        # The same lock orders revocation, detailed replies and emit enqueueing.
+        self._admin_lock = threading.RLock()
+        self._admin_logins = {}
+        self._socket_logins = {}
+        self._max_admin_logins = 1024
         
         # 配置CORS - 已移除，项目为同域部署，不需要CORS功能
         # CORS(self.app, origins="*" if config.DEBUG else config.WEBSOCKET_CONFIG['cors_allowed_origins'])
@@ -199,6 +236,90 @@ class WebManager:
         
         # 设置logger的web实例引用，用于实时日志推送
         logger.set_web_instance(self)
+
+    def _revoke_login_locked(self, login_id):
+        grant = self._admin_logins.pop(login_id, None)
+        if grant:
+            for sid in grant['sids']:
+                self._socket_logins.pop(sid, None)
+                self.socketio.server.leave_room(sid, 'admin_data', namespace='/')
+
+    def _prune_logins_locked(self):
+        now = time.monotonic()
+        for login_id, grant in list(self._admin_logins.items()):
+            if grant['expires_at'] <= now:
+                self._revoke_login_locked(login_id)
+
+    def _begin_admin_login(self, username):
+        with self._admin_lock:
+            self._prune_logins_locked()
+            old_id = session.get('admin_login_id')
+            if old_id not in self._admin_logins and len(self._admin_logins) >= self._max_admin_logins:
+                return False
+            self._revoke_login_locked(old_id)
+            login_id = secrets.token_urlsafe(32)
+            self._admin_logins[login_id] = {
+                'expires_at': time.monotonic() + self.app.permanent_session_lifetime.total_seconds(),
+                'sids': set(),
+            }
+            session.clear()
+            session['admin_logged_in'] = True
+            session['admin_username'] = username
+            session['admin_login_id'] = login_id
+            return True
+
+    def _is_admin(self):
+        with self._admin_lock:
+            self._prune_logins_locked()
+            login_id = session.get('admin_login_id')
+            if not session.get('admin_logged_in') or login_id not in self._admin_logins:
+                return False
+            sid = getattr(request, 'sid', None)
+            return sid is None or self._socket_logins.get(sid) == login_id
+
+    def _require_socket_admin(self, handler):
+        @wraps(handler)
+        def guarded(*args, **kwargs):
+            with self._admin_lock:
+                if not self._is_admin():
+                    return self._unauthorized_socket_reply()
+            # Do not hold the auth lock while taking parser/connection locks.
+            return handler(*args, **kwargs)
+        return guarded
+
+    @staticmethod
+    def _unauthorized_socket_reply():
+        error = {'error': 'unauthorized', 'message': '尚未登入或登入狀態已過期'}
+        emit('error', error)
+        return error
+
+    def _reply_admin(self, event, payload):
+        with self._admin_lock:
+            # Logout may have happened while the handler read its data.
+            if not self._is_admin():
+                return self._unauthorized_socket_reply()
+            emit(event, payload)
+
+    def _emit_admin(self, event, payload):
+        # emit enqueues messages but can synchronously call disconnect on timeout.
+        # Messages already enqueued before logout cannot be recalled from a browser.
+        failed = False
+        with self._admin_lock:
+            self._prune_logins_locked()
+            for sid, login_id in list(self._socket_logins.items()):
+                if self._socket_logins.get(sid) != login_id:
+                    continue
+                grant = self._admin_logins.get(login_id)
+                if grant is None or grant['expires_at'] <= time.monotonic():
+                    self._revoke_login_locked(login_id)
+                    continue
+                try:
+                    self.socketio.emit(event, payload, to=sid, namespace='/')
+                except Exception:
+                    failed = True
+        if failed:
+            # Local diagnostic only, outside the lock; never re-enter Web push.
+            logging.getLogger(__name__).error('部分管理資料推送失敗')
     
     def _format_uptime_simple(self, uptime_seconds):
         """格式化运行时间（简单版本）"""
@@ -248,7 +369,7 @@ class WebManager:
             return f"<h1>找不到範本檔案：{template_name}</h1>"
         except Exception as e:
             log_error(f"載入範本檔案失敗：{e}")
-            return f"<h1>載入範本失敗：{str(e)}</h1>"
+            return "<h1>載入範本失敗</h1>"
     
     def _register_routes(self):
         """注册Flask路由"""
@@ -274,18 +395,23 @@ class WebManager:
             """主页 - SPA应用"""
             if (
                 request.args.get('page') == 'monitor'
-                and not session.get('admin_logged_in')
+                and not self._is_admin()
             ):
                 return redirect('/login?redirect=monitor')
-            map_config = config.get_public_map_config()
+            map_config = config.get_public_map_config() if self._is_admin() else None
             
-            return self._load_template('spa.html', 
-                                     map_provider=map_config['provider'],
-                                     google_maps_enabled=map_config['google_enabled'],
-                                     map_default_latitude=map_config['default_latitude'],
-                                     map_default_longitude=map_config['default_longitude'],
-                                     map_default_zoom=map_config['default_zoom'],
-                                     google_maps_script_url=config.get_google_maps_script_url())
+            html = self._load_template('spa.html',
+                                     **({
+                                         'map_provider': map_config['provider'],
+                                         'google_maps_enabled': map_config['google_enabled'],
+                                         'map_default_latitude': map_config['default_latitude'],
+                                         'map_default_longitude': map_config['default_longitude'],
+                                         'map_default_zoom': map_config['default_zoom'],
+                                         'google_maps_script_url': config.get_google_maps_script_url(),
+                                     } if map_config else {}))
+            if map_config and not self._is_admin():
+                return self._load_template('spa.html')
+            return html
         
         @self.app.route('/classic')
         @self.require_login
@@ -345,8 +471,8 @@ class WebManager:
                     return self._load_template('login.html', error=password_error)
                 
                 if self.db_manager.verify_admin(username, password):
-                    session['admin_logged_in'] = True
-                    session['admin_username'] = username
+                    if not self._begin_admin_login(username):
+                        return jsonify({'error': '登入容量已滿，請稍後再試'}), 503
                     
                     # 检查重定向参数
                     redirect_page = request.args.get('redirect')
@@ -362,7 +488,9 @@ class WebManager:
         @self.app.route('/logout', methods=['GET', 'POST'])
         def logout():
             """登出"""
-            session.clear()
+            with self._admin_lock:
+                self._revoke_login_locked(session.get('admin_login_id'))
+                session.clear()
             if request.method == 'POST':
                 return jsonify({'success': True})
             return redirect(url_for('login'))
@@ -394,8 +522,8 @@ class WebManager:
                     return jsonify({'error': '使用者名稱含有不允許的字元'}), 400
                 
                 if self.db_manager.verify_admin(username, password):
-                    session['admin_logged_in'] = True
-                    session['admin_username'] = username
+                    if not self._begin_admin_login(username):
+                        return jsonify({'error': '登入容量已滿，請稍後再試'}), 503
                     return jsonify({
                         'success': True,
                         'message': '登入成功',
@@ -599,7 +727,7 @@ class WebManager:
                     if data_type != 'msm_satellite':
                         # print(f"[后端推送] 通过SocketIO推送数据到前端 - 事件: rtcm_realtime_data")
                         pass
-                    self.socketio.emit(
+                    self._emit_admin(
                         'rtcm_realtime_data',
                         parsed_data
                     )
@@ -698,7 +826,7 @@ class WebManager:
                 })
             except Exception as e:
                 log_error(f"取得應用程式資訊失敗：{e}")
-                return jsonify({'error': str(e)}), 500
+                return jsonify({'error': '無法取得應用程式資訊'}), 500
         
         @self.app.route('/api/users', methods=['GET', 'POST'])
         @self.require_login
@@ -1225,9 +1353,10 @@ class WebManager:
                     return jsonify({'error': '無法取得系統統計資料'}), 500
             except Exception as e:
                 log_error(f"API 例外：取得系統統計資料失敗：{e}")
-                return jsonify({'error': str(e)}), 500
+                return jsonify({'error': '無法取得系統統計資料'}), 500
         
         @self.app.route('/api/str-table', methods=['GET'])
+        @self.require_login
         def api_str_table():
             """获取实时STR表数据"""
             try:
@@ -1252,6 +1381,7 @@ class WebManager:
                 }), 500
         
         @self.app.route('/api/mounts/online', methods=['GET'])
+        @self.require_login
         def api_online_mounts_detailed():
             """获取详细的在线挂载点信息"""
             try:
@@ -1317,10 +1447,16 @@ class WebManager:
             from flask import session
             client_id = session.get('sid', 'unknown')
             log_web_request('websocket', 'connect', client_id, 'WebSocket 用戶端連線')
-            # 公開 room 只接收非敏感摘要；管理員 room 可接收管理日誌。
-            join_room('data_push')
-            if session.get('admin_logged_in'):
-                join_room('admin_data')
+            with self._admin_lock:
+                self._prune_logins_locked()
+                login_id = session.get('admin_login_id')
+                if login_id or session.get('admin_logged_in'):
+                    if not session.get('admin_logged_in') or login_id not in self._admin_logins:
+                        return False
+                    self._socket_logins[request.sid] = login_id
+                    self._admin_logins[login_id]['sids'].add(request.sid)
+                    join_room('admin_data')
+                join_room('data_push')
             if config.LOG_FREQUENT_STATUS:
                 log_info(f"用戶端 {client_id} 已加入 data_push 房間")
             emit('status', {'message': '連線成功'})
@@ -1329,6 +1465,11 @@ class WebManager:
         def handle_disconnect():
             """客户端断开连接"""
             from flask import session
+            with self._admin_lock:
+                login_id = self._socket_logins.pop(request.sid, None)
+                grant = self._admin_logins.get(login_id)
+                if grant:
+                    grant['sids'].discard(request.sid)
             client_id = session.get('sid', 'unknown')
             log_web_request('websocket', 'disconnect', client_id, 'WebSocket 用戶端中斷連線')
             # Web parser 是全域管理服務，不屬於單一瀏覽器連線。
@@ -1336,25 +1477,27 @@ class WebManager:
             log_debug("WebSocket 用戶端已中斷；保留全域 Web 解析執行緒")
         
         @self.socketio.on('request_mount_data')
+        @self._require_socket_admin
         def handle_request_mount_data(data):
             """请求挂载点数据"""
             mount = data.get('mount')
             if mount:
                 parsed_data = rtcm_manager.get_parsed_mount_data(mount)
                 statistics = rtcm_manager.get_mount_statistics(mount)
-                emit('mount_data', {
+                return self._reply_admin('mount_data', {
                     'mount': mount,
                     'data': parsed_data,
                     'statistics': statistics
                 })
         
         @self.socketio.on('request_recent_data')
+        @self._require_socket_admin
         def handle_request_recent_data(data):
             """前端请求挂载点最近解析的数据"""
             mount_name = data.get('mount_name')
             if mount_name:
                 recent_data = rtcm_manager.get_parsed_mount_data(mount_name)
-                emit('recent_data_response', {
+                return self._reply_admin('recent_data_response', {
                     'mount_name': mount_name,
                     'data': recent_data
                 })
@@ -1377,19 +1520,20 @@ class WebManager:
                     emit('error', {'message': '伺服器執行個體無法使用'})
             except Exception as e:
                 log_error(f"處理系統統計資料請求失敗：{e}")
-                emit('error', {'message': str(e)})
+                emit('error', {'message': '無法取得系統統計資料'})
     
     def require_login(self, f):
         """登录装饰器"""
         @wraps(f)
         def decorated_function(*args, **kwargs):
-            if not session.get('admin_logged_in'):
-                # 检查是否是API请求
-                if request.path.startswith('/api/'):
-                    return jsonify({'error': '尚未登入或登入狀態已過期'}), 401
-                else:
-                    return redirect(url_for('login'))
-            return f(*args, **kwargs)
+            if self._is_admin():
+                result = f(*args, **kwargs)
+                # Do not return detail fetched across a concurrent logout.
+                if self._is_admin():
+                    return result
+            if request.path.startswith('/api/'):
+                return jsonify({'error': '尚未登入或登入狀態已過期'}), 401
+            return redirect(url_for('login'))
         return decorated_function
     
     def start_rtcm_parsing(self):
@@ -1448,7 +1592,11 @@ class WebManager:
                 pass
                 
                 # 推送在线挂载点列表
-                online_mounts = connection.get_connection_manager().get_online_mounts()
+                mount_stats = connection.get_connection_manager().get_statistics()['mounts']
+                online_mounts = {
+                    summary['mount_name']: summary
+                    for summary in map(_public_mount_summary, mount_stats)
+                }
                 self.socketio.emit('online_mounts_update', {
                     'mounts': online_mounts,
                     'timestamp': time.time()
@@ -1458,10 +1606,10 @@ class WebManager:
                 
                 # 推送STR表数据
                 str_data = connection.get_connection_manager().get_all_str_data()
-                self.socketio.emit('str_data_update', {
+                self._emit_admin('str_data_update', {
                     'str_data': str_data,
                     'timestamp': time.time()
-                }, to='data_push')
+                })
                 # 移除调试日志输出
                 pass
                 
@@ -1473,13 +1621,13 @@ class WebManager:
     def push_log_message(self, message, log_type='info'):
         """推送日志消息到前端"""
         try:
-            self.socketio.emit('log_message', {
+            self._emit_admin('log_message', {
                 'message': message,
                 'type': log_type,
                 'timestamp': time.time()
-            }, to='admin_data')
+            })
         except Exception as e:
-            log_error(f"推送日誌訊息失敗：{e}")
+            logging.getLogger(__name__).error('推送日誌訊息失敗', exc_info=True)
     
     def _format_uptime(self, uptime_seconds):
         """格式化运行时间"""
