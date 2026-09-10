@@ -1683,9 +1683,11 @@
 <body
     data-map-provider="{{ map_provider or 'osm' }}"
     data-google-maps-enabled="{{ 'true' if google_maps_enabled else 'false' }}"
+    {% if map_default_latitude is defined %}
     data-map-default-latitude="{{ map_default_latitude if map_default_latitude is defined else 23.7 }}"
     data-map-default-longitude="{{ map_default_longitude if map_default_longitude is defined else 121.0 }}"
     data-map-default-zoom="{{ map_default_zoom if map_default_zoom is defined else 7 }}"
+    {% endif %}
 >
     <div class="container">
         <!-- 顶部标题 -->
