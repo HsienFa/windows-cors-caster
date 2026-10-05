@@ -1890,6 +1890,7 @@ function getUsersContent(users) {
         <div class="page-header">
             <h3>使用者管理</h3>
             <button onclick="showAddUserForm()" class="btn btn-primary">新增使用者</button>
+            <button onclick="showUserImport()" class="btn btn-secondary">批次匯入</button>
         </div>
         <div class="table-container">
             <table class="data-table">

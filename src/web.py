@@ -207,6 +207,8 @@ class WebManager:
         self._admin_logins = {}
         self._socket_logins = {}
         self._max_admin_logins = 1024
+        from .user_import_web import UserImport
+        self.user_import = UserImport(self)
         
         # 配置CORS - 已移除，项目为同域部署，不需要CORS功能
         # CORS(self.app, origins="*" if config.DEBUG else config.WEBSOCKET_CONFIG['cors_allowed_origins'])
@@ -238,6 +240,7 @@ class WebManager:
         logger.set_web_instance(self)
 
     def _revoke_login_locked(self, login_id):
+        self.user_import.revoke(login_id)
         grant = self._admin_logins.pop(login_id, None)
         if grant:
             for sid in grant['sids']:
@@ -245,6 +248,7 @@ class WebManager:
                 self.socketio.server.leave_room(sid, 'admin_data', namespace='/')
 
     def _prune_logins_locked(self):
+        self.user_import.prune()
         now = time.monotonic()
         for login_id, grant in list(self._admin_logins.items()):
             if grant['expires_at'] <= now:

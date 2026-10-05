@@ -95,6 +95,8 @@ class GitHubActionsWorkflowTests(unittest.TestCase):
         self.assertEqual(windows_tests.count("self._require_windows_cmd()"), 2)
 
     def test_full_required_test_groups_and_syntax_checks_are_present(self):
+        for job in ('application-tests', 'windows-native-tests'):
+            self.assertIn('test_user_import.py', self._job_source(job))
         required_test_files = (
             "test_windows_compat.py",
             "test_traditional_chinese_ui.py",

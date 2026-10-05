@@ -10,6 +10,11 @@ python-engineio==4.13.5 # 包含 GHSA-cgwc-pv48-fhj5 的修正
 werkzeug>=3.0.6        # 修复 CVE-2024-34069, CVE-2024-49767, CVE-2024-49766, CVE-2023-46136
 psutil==5.9.5          # 系统性能监控
 
+# 管理員 XLSX 匯入；XML 防護與 ZIP 上限由匯入邊界強制檢查。
+openpyxl==3.1.5
+defusedxml==0.7.1
+et-xmlfile==2.0.0
+
 # 构建和包管理工具
 setuptools>=78.1.1     # 修复 CVE-2025-47273, CVE-2024-6345
 
