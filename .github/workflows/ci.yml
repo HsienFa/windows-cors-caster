@@ -83,6 +83,9 @@ jobs:
       - name: Run rover frontend tests
         run: python -m unittest discover -s tests -p "test_rover_frontend.py"
 
+      - name: Run bounded user bulk import tests
+        run: python -m unittest discover -s tests -p "test_user_import.py"
+
       - name: Check Python syntax
         shell: bash
         run: |
@@ -188,6 +191,10 @@ jobs:
       - name: Run Windows graceful shutdown tests
         shell: pwsh
         run: python -m unittest discover -s tests -p "test_graceful_shutdown.py"
+
+      - name: Run bounded user bulk import tests
+        shell: pwsh
+        run: python -m unittest discover -s tests -p "test_user_import.py"
 
   deployment-static:
     name: GNU Make and Docker Compose static validation

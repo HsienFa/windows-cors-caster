@@ -5,6 +5,7 @@ import hashlib
 import secrets
 import logging
 from threading import Lock
+from contextlib import closing
 from . import config
 from . import logger
 from .logger import log_debug, log_info, log_warning, log_error, log_critical, log_database_operation, log_authentication
@@ -428,7 +429,61 @@ def update_admin_password(username, new_password):
 
 class DatabaseManager:
     """数据库管理器类，包装数据库操作函数"""
-    
+
+    def existing_import_users(self, usernames):
+        """Bounded name-only lookup; never fetch existing password hashes."""
+        if not usernames:
+            return set()
+        with closing(sqlite3.connect(config.DATABASE_PATH, timeout=2)) as conn:
+            marks = ','.join('?' for _ in usernames)
+            return {row[0] for row in conn.execute(
+                f'SELECT username FROM users WHERE username IN ({marks})', usernames)}
+
+    def import_users_atomic(self, hashed_users, commit_guard):
+        """DB lock -> auth lock, matching existing DB logging -> Web push order.
+
+        Caller hashes before entry. No logging under either lock. Guard serializes
+        the final validity check and commit with logout; it must not acquire DB locks.
+        """
+        from .user_import import ImportProblem
+        if not db_lock.acquire(timeout=2):
+            raise ImportProblem('database_busy', 503)
+        conn = None
+        committed = False
+        try:
+            conn = sqlite3.connect(config.DATABASE_PATH, timeout=2)
+            conn.execute('BEGIN IMMEDIATE')
+            names = [username for username, _ in hashed_users]
+            marks = ','.join('?' for _ in names)
+            if conn.execute(f'SELECT 1 FROM users WHERE username IN ({marks})', names).fetchone():
+                raise ImportProblem('account_conflict', 409)
+            conn.executemany('INSERT INTO users (username, password) VALUES (?, ?)', hashed_users)
+            with commit_guard():
+                conn.commit()
+                committed = True
+        except ImportProblem:
+            if conn is not None:
+                conn.rollback()
+            raise
+        except sqlite3.IntegrityError:
+            if conn is not None:
+                conn.rollback()
+            raise ImportProblem('account_conflict', 409) from None
+        except Exception:
+            if committed:
+                raise ImportProblem('commit_result_unknown', 503) from None
+            if conn is not None:
+                conn.rollback()
+            raise ImportProblem('database_error', 503) from None
+        finally:
+            try:
+                if conn is not None:
+                    conn.close()
+            except Exception:
+                raise ImportProblem('commit_result_unknown' if committed else 'database_error', 503) from None
+            finally:
+                db_lock.release()
+
     def __init__(self):
         """初始化数据库管理器"""
         pass
